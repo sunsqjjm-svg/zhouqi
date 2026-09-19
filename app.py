@@ -34,6 +34,13 @@ def get_symbol_prefix(code):
         return f"bj{code}"
     return f"sz{code}"
 
+def get_em_secid(code):
+    code = str(code).strip()
+    if code.startswith('6') or code.startswith('9'):
+        return f"1.{code}"
+    else:
+        return f"0.{code}"
+
 # 2. 股票搜索
 @st.cache_data(ttl=86400)
 def search_stock(keyword):
@@ -62,12 +69,12 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 实时行情与 10 年超长周期前复权日 K 线引擎
+# 3. 实时行情与 10 年高精度前复权 K 线引擎 (三级容灾)
 @st.cache_data(ttl=300)
-def fetch_stock_data(secid, years=10):
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com"}
+def fetch_stock_data(secid, code, years=10):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.qq.com"}
     
-    # 实时行情 (腾讯)
+    # (1) 实时行情 (腾讯，100%稳定)
     r_q = requests.get(f"https://qt.gtimg.cn/q={secid}", headers=headers, timeout=6)
     r_q.encoding = "gbk"
     parts = r_q.text.split('="')[1].split('~')
@@ -79,53 +86,38 @@ def fetch_stock_data(secid, years=10):
     curr_pe_dyn = safe_float(parts[52]) if len(parts) > 52 else 0.0
     curr_pb = safe_float(parts[46], default=1.0)
 
-    # 计算 10 年前真实起始日期
-    start_date = (datetime.now() - timedelta(days=years * 365 + 15)).strftime("%Y-%m-%d")
     records = []
-
-    # 10年大跨度双段高可靠抓取（合并腾讯两段 5 年数据，完美拼装出 10 年 2500 日完整历史）
-    mid_date = (datetime.now() - timedelta(days=int(years/2) * 365)).strftime("%Y-%m-%d")
     
-    # 阶段 A：前半段（5~10年前）
+    # (2) 10 年日 K 线主通道：东财高精度大历史接口 (一次性拉取 3000 日，覆盖 10~12 年完整历史)
     try:
-        url_a = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,{start_date},{mid_date},1300,qfq"
-        res_a = requests.get(url_a, headers=headers, timeout=6).json()
-        data_a = res_a.get("data", {}).get(secid, {})
-        list_a = data_a.get("qfqday") or data_a.get("day") or []
-        for it in list_a:
+        em_id = get_em_secid(code)
+        em_url = (
+            f"https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+            f"secid={em_id}&klt=101&fqt=1&lmt=3000&end=20500101&"
+            f"fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56"
+        )
+        r_em = requests.get(em_url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}, timeout=8)
+        k_data = r_em.json().get("data", {})
+        klines = k_data.get("klines", [])
+        for k in klines:
+            p = k.split(",")
             records.append({
-                "日期": datetime.strptime(str(it[0])[:10], "%Y-%m-%d"),
-                "收盘": float(it[2]),
-                "最高": float(it[3]),
-                "最低": float(it[4])
+                "日期": datetime.strptime(p[0], "%Y-%m-%d"),
+                "收盘": float(p[2]),
+                "最高": float(p[3]),
+                "最低": float(p[4])
             })
     except Exception:
         pass
 
-    # 阶段 B：后半段（近 5 年至今）
-    try:
-        url_b = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,{mid_date},,1300,qfq"
-        res_b = requests.get(url_b, headers=headers, timeout=6).json()
-        data_b = res_b.get("data", {}).get(secid, {})
-        list_b = data_b.get("qfqday") or data_b.get("day") or []
-        for it in list_b:
-            records.append({
-                "日期": datetime.strptime(str(it[0])[:10], "%Y-%m-%d"),
-                "收盘": float(it[2]),
-                "最高": float(it[3]),
-                "最低": float(it[4])
-            })
-    except Exception:
-        pass
-
-    # 备选单段通道兜底
-    if len(records) < 500:
+    # (3) 备选通道：腾讯前复权 K 线 (取最大允许的 1000 交易日)
+    if not records:
         try:
-            url_fallback = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,{years*250},qfq"
-            res_fb = requests.get(url_fallback, headers=headers, timeout=6).json()
-            data_fb = res_fb.get("data", {}).get(secid, {})
-            list_fb = data_fb.get("qfqday") or data_fb.get("day") or []
-            for it in list_fb:
+            url_tx = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,1000,qfq"
+            res_tx = requests.get(url_tx, headers=headers, timeout=6).json()
+            data_tx = res_tx.get("data", {}).get(secid, {})
+            list_tx = data_tx.get("qfqday") or data_tx.get("day") or []
+            for it in list_tx:
                 records.append({
                     "日期": datetime.strptime(str(it[0])[:10], "%Y-%m-%d"),
                     "收盘": float(it[2]),
@@ -135,8 +127,25 @@ def fetch_stock_data(secid, years=10):
         except Exception:
             pass
 
+    # (4) 第三通道：新浪日K线备选
     if not records:
-        raise ValueError(f"未能获取到 {stock_name} 的 10 年行情数据，请刷新重试")
+        try:
+            s_url = f"https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol={secid}&scale=240&ma=no&datalen=1000"
+            r_s = requests.get(s_url, headers={"Referer": "https://finance.sina.com.cn"}, timeout=6)
+            s_data = r_s.json()
+            if isinstance(s_data, list):
+                for item in s_data:
+                    records.append({
+                        "日期": datetime.strptime(str(item.get("day", ""))[:10], "%Y-%m-%d"),
+                        "收盘": float(item["close"]),
+                        "最高": float(item["high"]),
+                        "最低": float(item["low"])
+                    })
+        except Exception:
+            pass
+
+    if not records:
+        raise ValueError(f"未能获取到 {stock_name} 的历史行情数据，请稍后刷新重试")
 
     df = pd.DataFrame(records).set_index("日期").sort_index()
     df = df[~df.index.duplicated(keep='first')]
@@ -148,10 +157,10 @@ def fetch_stock_data(secid, years=10):
     bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     df['pb'] = (df['收盘'] / bps).round(2)
 
-    # 15日平滑
+    # 15日平滑，过滤毛刺
     pb_smoothed = df['pb'].rolling(window=15, min_periods=1).mean()
     
-    # 统计 10 年完整产业周期的真实底与顶（5% 与 95% 极值分位）
+    # 统计 10 年完整周期的真实底与顶（5% 与 95% 极值分位）
     p_floor = float(df['pb'].quantile(0.05))
     p_cap = float(df['pb'].quantile(0.95))
 
@@ -195,7 +204,6 @@ with st.sidebar:
     if c6.button("紫金矿业"): preset = "紫金矿业"
 
     user_input = st.text_input("输入股票名称或6位代码", value=preset if preset else "中钢国际")
-    # 默认直接设为 10 年！
     years_back = st.slider("大周期回溯跨度（年）", min_value=5, max_value=12, value=10, step=1, help="强周期行业设备与产能周期（朱格拉周期）通常历时7-10年，推荐10年完整视角。")
 
 # --- 主逻辑计算 ---
@@ -207,7 +215,7 @@ if user_input:
         st.error(f"❌ 未识别标的「{user_input}」，请输入规范名称或代码。")
     else:
         try:
-            df, meta = fetch_stock_data(info['secid'], years=years_back)
+            df, meta = fetch_stock_data(info['secid'], info['code'], years=years_back)
             
             curr_price = meta["curr_price"]
             curr_pb = meta["curr_pb"]
@@ -220,7 +228,7 @@ if user_input:
             pb_cap = meta.get("pb_cap", float(df['pb'].quantile(0.95)))
             actual_span = meta.get("actual_years", 10.0)
 
-            st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`，已载入近 **{actual_span} 年** 完整大周期数据)")
+            st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`，已成功载入近 **{actual_span} 年** 完整大周期数据)")
 
             # 最新指标
             long_risk = df['long_risk'].iloc[-1]

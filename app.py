@@ -62,7 +62,7 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 实时行情、估值与动静态盈利拉取 (腾讯官方接口，全球CDN秒级响应)
+# 3. 实时行情、估值与动静态盈利拉取
 @st.cache_data(ttl=1800)
 def fetch_stock_data(secid, years=4):
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com"}
@@ -75,9 +75,14 @@ def fetch_stock_data(secid, years=4):
     stock_name = parts[1]
     curr_price = float(parts[3])
     curr_turnover = safe_float(parts[38]) # 换手率
-    curr_pe_ttm = safe_float(parts[39])   # TTM市盈率
-    curr_pe_dyn = safe_float(parts[40])   # 动态市盈率
-    curr_pb = safe_float(parts[46], default=1.0) # 市净率PB
+    curr_pe_ttm = safe_float(parts[39])   # TTM市盈率 (第39号字段)
+    
+    # 修复：腾讯动态市盈率在第 52 号字段（若不足52或为空则备选）
+    curr_pe_dyn = safe_float(parts[52]) if len(parts) > 52 else 0.0
+    if curr_pe_dyn == 0.0 and len(parts) > 40:
+        curr_pe_dyn = safe_float(parts[40]) # 备选
+        
+    curr_pb = safe_float(parts[46], default=1.0) # 市净率PB (第46号字段)
 
     # 历史日K线 (新浪财经)
     datalen = min(years * 250, 1020)
@@ -151,27 +156,27 @@ if user_input:
             pb_percentile = (df['pb'] < curr_pb).mean() * 100.0
             is_pb_bottom = pb_percentile <= 25.0
 
-            # 2. 真实 ROE 计算与上行/下行状态判定 (利用杜邦等式与动静态剪刀差)
+            # 2. 真实 ROE 测算与趋势判定 (杜邦关系: ROE = PB / PE)
             real_roe = (curr_pb / pe_ttm) * 100.0 if pe_ttm > 0 else 0.0
             
-            # 判断逻辑：
-            # 动态PE > TTM PE (说明当季利润同比在滑坡，盈利下行受毒打)
-            # 动态PE < TTM PE (说明当季利润同比在加速反弹，ROE拐头向上)
-            if pe_dyn <= 0 or pe_dyn > pe_ttm * 1.03 or real_roe < 4.0:
+            # 趋势判定逻辑
+            if real_roe < 6.5:
+                # 绝对值已在周期极低冰点
                 roe_status = "📉 处于下行末端 / 低谷受毒打中"
                 is_roe_declining = True
                 is_roe_rebounding = False
-                roe_desc = "动态市盈率高于 TTM，表明最新季度盈利仍在承压探底，完美契合‘股价见底在 ROE 下滑过程中完成’。"
-            elif pe_dyn < pe_ttm * 0.97:
+                roe_desc = f"当前 ROE 仅 {real_roe:.2f}%，业绩处于周期极低位受‘毒打’出清，符合‘股价底在 ROE 下滑过程中完成’。"
+            elif pe_dyn > 0 and pe_dyn < pe_ttm * 0.95:
+                # 动态 PE 显著低于 TTM，业绩强劲反弹
                 roe_status = "📈 见底反弹中 / 业绩转好"
                 is_roe_declining = False
                 is_roe_rebounding = True
-                roe_desc = "动态市盈率明显低于 TTM，表明最新单季利润已大幅转好，ROE 已步入回升通道。"
+                roe_desc = "最新单季盈利大幅改善，ROE 已进入回升通道，股价通常已离开绝对底部进入半山腰。"
             else:
-                roe_status = "⚖️ 处于中性磨底 / 走平阶段"
+                roe_status = "⚖️ 处于中性磨底阶段"
                 is_roe_declining = True
                 is_roe_rebounding = False
-                roe_desc = "最新季度盈利环比走平，处于周期极度低迷的出清末端。"
+                roe_desc = "盈利水平处于周期底部徘徊震荡期。"
 
             # 3. 综合长短周期风险打分 (PB 70% + 价格通道 30%)
             roll_high = df['收盘'].rolling(250, min_periods=30).max().iloc[-1]
@@ -179,7 +184,7 @@ if user_input:
             price_pos = (curr_price - roll_low) / (roll_high - roll_low) * 100.0 if roll_high > roll_low else 50.0
             risk_score = 0.7 * pb_percentile + 0.3 * price_pos
 
-            # 4. 周期位置核心裁决（原帖精髓）
+            # 4. 周期位置核心裁决
             if risk_score >= 90:
                 if curr_turnover >= 6.0:
                     stage = "🔴 周期大顶 / 高危预警 (双条件触发)"
@@ -190,7 +195,7 @@ if user_input:
 
             elif is_pb_bottom and is_roe_declining:
                 stage = "🟢 周期大底：双信号同时满足！(价格底成立)"
-                guidance = "【黄金买点】ROE 仍在下行受‘毒打’+ PB 跌入历史绝对低谷！严格印证‘股价底领先于业绩底’规律，策略：‘不着急，慢慢买’，左侧买入博弈 3~4 倍景气修复赔率！"
+                guidance = "【黄金买点】ROE 仍在下滑受‘毒打’+ PB 跌入历史绝对低谷！严格印证‘股价底领先于业绩底’规律，策略：‘不着急，慢慢买’，左侧买入博弈 3~4 倍景气修复赔率！"
 
             elif is_roe_rebounding and (20 < pb_percentile <= 60):
                 stage = "🟡 周期启动中段：已到半山腰"
@@ -227,7 +232,12 @@ if user_input:
                     st.warning(f"⚠️ 状态：{roe_status}")
                 else:
                     st.info(f"ℹ️ 状态：{roe_status}")
-                st.caption(f"PE(动态): {pe_dyn:.1f} | PE(TTM): {pe_ttm:.1f}")
+                
+                # 智能排版：杜绝出现 0.0 的尴尬
+                if pe_dyn > 0:
+                    st.caption(f"PE(动态): {pe_dyn:.1f} | PE(TTM): {pe_ttm:.1f}")
+                else:
+                    st.caption(f"PE(TTM): {pe_ttm:.1f} | PB: {curr_pb:.2f}")
 
             with s3:
                 st.metric("长短周期综合风险读数", f"{risk_score:.1f} %", delta="91% 极值红线", delta_color="inverse")

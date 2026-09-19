@@ -4,12 +4,13 @@ import numpy as np
 import requests
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 页面基础配置
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜集成右侧底部启动雷达")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜全池26只极值动能自动雷达扫描")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -50,6 +51,50 @@ PRESET_STOCKS = {
     "国泰集团": "sh603977", "四川美丰": "sz000731", "振华新材": "sh688707",
     "钢研高纳": "sz300034", "海南橡胶": "sh601118"
 }
+
+# ================= 全池 26 只股票并发极速扫描器 (<1% 与 >90%) =================
+def scan_single_stock(name, secid):
+    """单只股票快速抓取近 250 日通道并计算短周期动能"""
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com"}
+    url = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,300,qfq"
+    try:
+        r = requests.get(url, headers=headers, timeout=4).json()
+        data = r.get("data", {}).get(secid, {})
+        klines = data.get("qfqday") or data.get("day") or []
+        if len(klines) >= 30:
+            closes = [float(x[2]) for x in klines]
+            highs = [float(x[3]) for x in klines]
+            lows = [float(x[4]) for x in klines]
+            
+            # 最近 250 日（或实际长度）
+            c_now = closes[-1]
+            h_250 = max(highs[-250:])
+            l_250 = min(lows[-250:])
+            
+            denom = h_250 - l_250 if h_250 > l_250 else 1.0
+            short_risk = round(((c_now - l_250) / denom) * 100.0, 1)
+            return {
+                "name": name,
+                "code": secid[2:],
+                "price": c_now,
+                "short_risk": short_risk,
+                "h250": h_250,
+                "l250": l_250
+            }
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=300) # 5分钟缓存一次全池结果，秒级加载
+def run_pool_radar():
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(scan_single_stock, name, secid) for name, secid in PRESET_STOCKS.items()]
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                results.append(res)
+    return results
 
 @st.cache_data(ttl=86400)
 def search_stock(keyword):
@@ -200,7 +245,7 @@ def fetch_stock_data(secid, code, years=10):
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
 
-    # 均线系统计算 (用于右侧启动雷达)
+    # 均线系统 (用于右侧启动雷达)
     df['ma20'] = df['收盘'].rolling(20, min_periods=5).mean()
     df['ma60'] = df['收盘'].rolling(60, min_periods=10).mean()
 
@@ -222,15 +267,44 @@ def fetch_stock_data(secid, code, years=10):
     }
     return df, meta
 
+# ================= 页面顶部：自动全盘雷达扫描预警 =================
+with st.spinner("⚡ 正在全自动扫描 26 只周期股极值异动..."):
+    pool_data = run_pool_radar()
+
+# 筛选条件：小于 1.0% 或 大于 90.0%
+ice_stocks = [x for x in pool_data if x["short_risk"] <= 1.0]
+fire_stocks = [x for x in pool_data if x["short_risk"] >= 90.0]
+
+with st.expander("🔔 【全池实时扫描】26只周期股极端异动提醒 (短周期动能 ≤1% 极寒 / ≥90% 极热)", expanded=True):
+    col_alert1, col_alert2 = st.columns(2)
+    
+    with col_alert1:
+        st.markdown("##### 🟢 极度冰点潜伏区 (短周期动能 ≤ 1.0%)")
+        if ice_stocks:
+            st.success(f"共发现 **{len(ice_stocks)}** 只标的被砸进近 1 年绝对极限地板！")
+            for item in ice_stocks:
+                st.markdown(f"- **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **{item['short_risk']:.1f}%** (处于年内最低点 ¥{item['l250']:.2f})")
+        else:
+            st.info("暂无标的处于 ≤1.0% 的极端地板冰点。")
+
+    with col_alert2:
+        st.markdown("##### 🔴 极度过热高危区 (短周期动能 ≥ 90.0%)")
+        if fire_stocks:
+            st.error(f"共发现 **{len(fire_stocks)}** 只标的摸到近 1 年天花板，获利盘极度拥挤！")
+            for item in fire_stocks:
+                st.markdown(f"- **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **{item['short_risk']:.1f}%** (贴近天花板 ¥{item['h250']:.2f})")
+        else:
+            st.info("暂无标的处于 ≥90.0% 的极度泡沫过热区。")
+
 # --- 侧边栏交互 ---
 with st.sidebar:
     st.header("⚙️ 标的诊断设置")
     
-    # 1. 下拉快捷选择（26只精选池）
+    # 下拉快捷选择（26只精选池）
     stock_names = list(PRESET_STOCKS.keys())
     dropdown_pick = st.selectbox("📌 26只经典周期股快捷直选：", ["-- 点击下拉选择 --"] + stock_names)
 
-    # 2. 折叠式 2 列按钮面板
+    # 折叠式 2 列按钮面板
     preset_btn = None
     with st.expander("📂 展开 26 只周期股按钮网格", expanded=False):
         col1, col2 = st.columns(2)
@@ -239,7 +313,6 @@ with st.sidebar:
             if target_col.button(sname, key=f"btn_{idx}", use_container_width=True):
                 preset_btn = sname
 
-    # 确定当前选择项
     selected_target = "中钢国际"
     if dropdown_pick != "-- 点击下拉选择 --":
         selected_target = dropdown_pick
@@ -273,7 +346,7 @@ if user_input:
 
             st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`，已载入近 **{actual_span} 年** 完整大周期数据)")
 
-            # 最新分项指标
+            # 最新指标
             long_risk = df['long_risk'].iloc[-1]
             short_risk = df['short_risk'].iloc[-1]
             risk_score = df['risk_score'].iloc[-1]
@@ -303,23 +376,16 @@ if user_input:
                 is_roe_rebounding = False
                 roe_desc = "盈利水平处于常态化波动区间。"
 
-            # ================= 新增：【🚀 底部启动右侧雷达】核心判定 =================
+            # 【🚀 底部启动右侧雷达】
             curr_close = df['收盘'].iloc[-1]
             ma20_curr = df['ma20'].iloc[-1]
             ma60_curr = df['ma60'].iloc[-1]
             
-            # 条件 1：生命线破局 (站上 60 日季度线，且 MA20 金叉向上)
             c_trend = (curr_close >= ma60_curr) and (ma20_curr >= ma60_curr)
-            
-            # 条件 2：双底抬升 (近 25 日最低价 高于 近 120 日最低价 4% 以上)
             low_25d = df['最低'].tail(25).min()
             low_120d = df['最低'].tail(120).min()
             c_wbottom = low_25d > (low_120d * 1.04)
-
-            # 条件 3：短周期动能冲破中轴 (突破 48% 压制)
             c_momentum = short_risk >= 48.0
-
-            # 条件 4：估值安全垫仍在 (长周期 PB 尚未进入高泡沫，仍处于 ≤45% 适宜上车区)
             c_val_safe = long_risk <= 45.0
 
             launch_checks = [c_trend, c_wbottom, c_momentum, c_val_safe]
@@ -338,7 +404,7 @@ if user_input:
                 launch_style = "warning"
                 launch_action = "【切忌重仓盲目冲入】虽然长线估值便宜，但短线均线仍受压制、缺乏向上动能。策略：继续‘不着急，慢慢买’分批潜伏。"
 
-            # 周期大位置核心裁决
+            # 周期位置核心裁决
             if long_risk >= 85 and short_risk >= 85:
                 stage = "🔴 周期大顶：长短周期同时触顶 (双共振清仓)"
                 guidance = "10年长周期估值泡沫化 + 短周期情绪极限超买！触发作者最高级别大顶预警，坚决分批离场防 40%+ 级暴跌！"
@@ -364,10 +430,8 @@ if user_input:
             # ================= 视图展示 =================
             st.subheader(f"📌 周期裁决：{stage}")
 
-            # 专设：【🚀 底部启动右侧雷达看板】
+            # 【🚀 底部启动右侧雷达看板】
             st.markdown("#### 🚀 底部启动右侧雷达 (解决不知道何时启动的痛点)")
-            
-            # 状态大横幅
             if launch_style == "success":
                 st.success(f"**判定结果：{launch_badge}**\n\n{launch_action}")
             elif launch_style == "info":
@@ -375,7 +439,6 @@ if user_input:
             else:
                 st.warning(f"**判定结果：{launch_badge}**\n\n{launch_action}")
 
-            # 4 项右侧启动指标打勾清单
             r1, r2, r3, r4 = st.columns(4)
             with r1:
                 st.metric("1. 均线生命线破局", "站上MA60" if c_trend else "受均线压制", 
@@ -398,7 +461,7 @@ if user_input:
                 st.caption("长周期风险仍处于 ≤45% 底位")
 
             # 4 个独立指标卡
-            st.markdown("#### ⚡ 周期核心独立读数")
+            st.markdown("#### ⚡ 周期独立读数与核心信号")
             c1, c2, c3, c4 = st.columns(4)
             with c1:
                 st.metric("信号 1：PB 估值位置", f"{curr_pb:.2f}")
@@ -463,8 +526,8 @@ if user_input:
                 fig_short.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近2年高清视角)", yaxis_title="短周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
                 st.plotly_chart(fig_short, use_container_width=True)
 
-            # ================= 模块： 极值对账 =================
-            st.markdown("### 📋 周期极值回溯对账")
+            # ================= 模块：作者同款 Tushare 极值对账 =================
+            st.markdown("### 📋 周期极值回溯对账（复现作者复盘方法）")
             lowest_row = df.loc[df['收盘'].idxmin()]
             lowest_date = df['收盘'].idxmin().strftime('%Y-%m-%d')
             lowest_price = lowest_row['最低']

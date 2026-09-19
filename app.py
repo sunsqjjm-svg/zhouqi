@@ -62,8 +62,8 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 实时行情与高可靠 K 线数据 (强制截断未来脏数据)
-@st.cache_data(ttl=300) # 5分钟刷新，防止缓存旧脏数据
+# 3. 实时行情与高可靠 K 线数据
+@st.cache_data(ttl=300)
 def fetch_stock_data(secid, years=4):
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com"}
     
@@ -126,7 +126,7 @@ def fetch_stock_data(secid, years=4):
     df = pd.DataFrame(records).set_index("日期").sort_index()
     df = df[~df.index.duplicated(keep='first')]
 
-    # 【铁律修复】：绝对不准出现未来日期！严格过滤掉所有大于今天的错误时间戳
+    # 强制截断未来脏数据
     today_dt = datetime.now()
     df = df[df.index <= today_dt]
 
@@ -134,17 +134,13 @@ def fetch_stock_data(secid, years=4):
     bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     df['pb'] = (df['收盘'] / bps).round(2)
 
-    # ================= 核心重构：周期绝对极值映射 (告别横盘虚高80%) =================
-    # 1. 20日平滑，过滤掉几毛钱的微观毛刺
+    # 周期绝对极值映射
     pb_smoothed = df['pb'].rolling(window=15, min_periods=1).mean()
+    p_floor = float(df['pb'].quantile(0.05))
+    p_cap = float(df['pb'].quantile(0.95))
 
-    # 2. 统计整个 4 年大周期的真实大底(5%分位)与真实大顶(95%分位)
-    pb_floor = df['pb'].quantile(0.05) # 周期底部底线 (中钢约 0.78)
-    pb_cap = df['pb'].quantile(0.95)   # 周期顶部天花板 (中钢约 1.65)
-
-    # 3. 线性真实映射：横盘时稳定在 10%~25%，绝不乱窜到 80%！
-    denom = pb_cap - pb_floor if pb_cap > pb_floor else 1.0
-    df['long_risk'] = (((pb_smoothed - pb_floor) / denom) * 100.0).clip(0, 100).round(1)
+    denom = p_cap - p_floor if p_cap > p_floor else 1.0
+    df['long_risk'] = (((pb_smoothed - p_floor) / denom) * 100.0).clip(0, 100).round(1)
 
     # 短周期 1 年动能通道
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
@@ -160,7 +156,9 @@ def fetch_stock_data(secid, years=4):
         "curr_pb": curr_pb,
         "curr_turnover": curr_turnover,
         "pe_ttm": curr_pe_ttm,
-        "pe_dyn": curr_pe_dyn
+        "pe_dyn": curr_pe_dyn,
+        "pb_floor": p_floor,
+        "pb_cap": p_cap
     }
     return df, meta
 
@@ -200,6 +198,10 @@ if user_input:
             pe_dyn = meta["pe_dyn"]
             name = meta["stock_name"]
             
+            # 【修复定义】：全局定义底线与顶线，杜绝 NameError
+            pb_floor = meta.get("pb_floor", float(df['pb'].quantile(0.05)))
+            pb_cap = meta.get("pb_cap", float(df['pb'].quantile(0.95)))
+
             st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`)")
 
             # 最新指标
@@ -274,7 +276,7 @@ if user_input:
                 st.metric("🔵 长周期风险读数 (周期极值)", f"{long_risk:.1f} %", 
                           delta="大底机会" if long_risk<=25 else ("高估泡沫" if long_risk>=85 else "中性"),
                           delta_color="inverse" if long_risk>=85 else "normal")
-                st.caption(f"距4年绝对极值底: {pb_floor:.2f} ~ 顶: {pb_cap:.2f}")
+                st.caption(f"距4年极值底: {pb_floor:.2f} ~ 顶: {pb_cap:.2f}")
 
             with c4:
                 st.metric("🟠 短周期风险读数 (1年动能)", f"{short_risk:.1f} %", 

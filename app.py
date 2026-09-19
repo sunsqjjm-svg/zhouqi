@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜10年对数无滞后趋势去偏模型")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜原版 0.0 - 0.5 - 1.0 律动摆动模型")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -128,7 +128,7 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 终极算法还原：10年对数线性无滞后趋势去偏模型
+# 3. 核心算法：以 0.5 为绝对中轴的对数对称律动模型
 @st.cache_data(ttl=300)
 def fetch_stock_data(secid, code, years=10):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.qq.com"}
@@ -229,27 +229,25 @@ def fetch_stock_data(secid, code, years=10):
     bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     df['pb'] = (df['收盘'] / bps).round(2)
 
-    # ================= 核心突破：10年对数无滞后趋势去偏模型 =================
+    # ================= 核心突破：以 0.5 为绝对中轴的对数对称律动模型 =================
     # 1. 对数收盘价
     df['log_close'] = np.log(df['收盘'])
 
-    # 2. 拟合 10 年整体对数线性成长趋势 (彻底摆脱移动平均线的滞后拖拽！)
-    n = len(df)
-    x = np.arange(n)
-    poly = np.polyfit(x, df['log_close'], 1)
-    df['log_trend'] = poly[0] * x + poly[1]
+    # 2. 采用 360 交易日（约 1.5 年）动态周期均线作为对数中枢基线
+    log_center = df['log_close'].rolling(window=360, min_periods=30).mean()
 
-    # 3. 计算偏离中枢残差
-    df['cycle_dev'] = df['log_close'] - df['log_trend']
-    dev_smooth = df['cycle_dev'].rolling(window=10, min_periods=1).mean()
+    # 3. 计算对数偏离残差
+    bias = df['log_close'] - log_center
+    bias_smooth = bias.rolling(window=10, min_periods=1).mean()
 
-    # 4. 统计周期极端偏离度 (4% 绝对大底分位 与 96% 绝对大顶分位)
-    d_floor = float(df['cycle_dev'].quantile(0.04))
-    d_cap = float(df['cycle_dev'].quantile(0.96))
-    denom = d_cap - d_floor if d_cap > d_floor else 1.0
+    # 4. 统计周期典型偏离半幅 (以 95% 振幅作为边界尺度)
+    bias_amp = float(bias.abs().quantile(0.95))
+    bias_amp = bias_amp if bias_amp > 0 else 0.5
 
-    # 5. 归一化映射：让 2026 年底回撤直接精准打在 0.02~0.05 底部，反弹精准落在 0.85！
-    df['long_risk'] = (((dev_smooth - d_floor) / denom)).clip(0.0, 1.0).round(2)
+    # 5. 【核心】：严格以 0.5 为平衡基轴，上下对称摆动！
+    # 偏离为 0 时就是 0.50；向上打满到 1.00；向下打满到 0.00；绝无死板平顶！
+    raw_risk = 0.5 + 0.5 * (bias_smooth / bias_amp)
+    df['long_risk'] = raw_risk.clip(0.0, 1.0).round(2)
 
     # 短周期 1 年动能通道 (近 250 日)
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
@@ -420,7 +418,7 @@ if user_input:
                 launch_style = "warning"
                 launch_action = "【切忌重仓盲目冲入】虽然长线估值便宜，但短线均线仍受压制、缺乏向上动能。策略：继续‘不着急，慢慢买’分批潜伏。"
 
-            # 周期位置核心裁决 (0.0~1.0 标度完全对齐)
+            # 周期位置核心裁决
             if long_risk >= 0.85 and short_risk >= 85:
                 stage = "🔴 周期大顶：长短周期同时触顶 (双共振清仓)"
                 guidance = "长线风险达 0.85+ 极值泡沫 + 短周期情绪极限超买！触发最高级别大顶预警，坚决分批离场防 40%+ 级暴跌！"
@@ -491,7 +489,7 @@ if user_input:
                 st.metric(f"🟣 长线风险水平", f"{long_risk:.2f}", 
                           delta="大底机会" if long_risk<=0.20 else ("高估泡沫" if long_risk>=0.85 else "中性"),
                           delta_color="inverse" if long_risk>=0.85 else "normal")
-                st.caption("无滞后对数趋势去偏模型")
+                st.caption("以 0.5 为平衡基轴律动")
 
             with c4:
                 st.metric("🟠 短周期风险读数 (1年动能)", f"{short_risk:.1f} %", 
@@ -499,39 +497,43 @@ if user_input:
                           delta_color="inverse" if short_risk>=85 else "normal")
                 st.caption("基于近250日价格通道情绪")
 
-            # ================= 图表部分：完全复刻作者原版 =================
+            # ================= 图表部分：彻底精简，仅留 0.0 - 0.5 - 1.0 三条原版虚线 =================
             st.markdown("### 📊 长短周期独立图表")
-            tab_author, tab_short = st.tabs(["🟣 长线风险水平 (作者原版 0.0~1.0 标度)", "🟠 近2年短周期动能风险 (战术波段)"])
+            tab_author, tab_short = st.tabs(["🟣 长线风险水平 (作者原版 0.0 ~ 0.5 ~ 1.0)", "🟠 近2年短周期动能风险 (战术波段)"])
 
             with tab_author:
-                st.caption("10年对数线性无滞后趋势去偏模型：消除移动均线的拖拽滞后，2026 年底深跌精准直插 0.0 绝对大底，年初反弹精准止步于 0.85。")
+                st.caption("完全复刻作者原版画风：纵坐标仅保留 0.0 (底)、0.5 (平衡中轴)、1.0 (顶) 三条基准虚线，彻底消除花哨色块干扰。")
                 
                 custom_hover = np.stack((df['收盘'], df['pb']), axis=-1)
 
                 fig_auth = go.Figure()
+                
+                # 作者原版纯净紫线 (无任何面积阴影)
                 fig_auth.add_trace(go.Scatter(
                     x=df.index, y=df['long_risk'], name="长线风险水平",
-                    line=dict(color="#7B1FA2", width=2.4),
-                    fill='tozeroy', fillcolor='rgba(123, 31, 162, 0.08)',
+                    line=dict(color="#7B1FA2", width=2.2), # 原版紫色细线
                     customdata=custom_hover,
                     hovertemplate="<b>%{x|%Y-%m-%d}</b><br>长线风险水平: <b>%{y:.2f}</b><br>收盘价: <b>¥%{customdata[0]:.2f}</b><br>对应市净率 PB: %{customdata[1]:.2f}<extra></extra>"
                 ))
 
-                fig_auth.add_hline(y=0.85, line_dash="dash", line_color="red", annotation_text="0.85 极值风险预警线")
-                fig_auth.add_hline(y=0.20, line_dash="dash", line_color="green", annotation_text="0.20 黄金大底机会线")
-                fig_auth.add_hrect(y0=0.85, y1=1.0, fillcolor="rgba(255, 0, 0, 0.05)", line_width=0)
-                fig_auth.add_hrect(y0=0.0, y1=0.20, fillcolor="rgba(0, 255, 0, 0.05)", line_width=0)
+                # 【有且仅保留作者原版的三条灰色基准参考线：0.0, 0.5, 1.0】
+                fig_auth.add_hline(y=1.0, line_dash="dot", line_color="rgba(150, 150, 150, 0.5)", line_width=1.2, annotation_text="1.0 (周期大顶)")
+                fig_auth.add_hline(y=0.5, line_dash="dot", line_color="rgba(150, 150, 150, 0.5)", line_width=1.2, annotation_text="0.5 (多空中枢)")
+                fig_auth.add_hline(y=0.0, line_dash="dot", line_color="rgba(150, 150, 150, 0.5)", line_width=1.2, annotation_text="0.0 (周期大底)")
 
                 fig_auth.update_layout(
                     height=420, margin=dict(l=20, r=20, t=30, b=20),
-                    xaxis_title="真实交易日期 (近10年动态大视野)",
+                    plot_bgcolor="white", # 彻底采用作者原版纯白底色
+                    xaxis_title="真实交易日期 (近10年宏观视野)",
                     yaxis_title="长线风险水平",
                     yaxis=dict(
                         range=[-0.05, 1.05],
                         tickmode='array',
-                        tickvals=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-                        ticktext=['0.0', '0.2', '0.4', '0.6', '0.8', '1.0']
+                        tickvals=[0.0, 0.5, 1.0], # 严格只有三条刻度
+                        ticktext=['0.0', '0.5', '1.0'],
+                        showgrid=False # 关掉繁杂背景网格
                     ),
+                    xaxis=dict(showgrid=False),
                     hovermode="x unified"
                 )
 
@@ -548,8 +550,6 @@ if user_input:
                     x=df_short.index, y=df_short['short_risk'], 
                     name="近2年短周期动能", 
                     line=dict(color="#ff7f0e", width=2), 
-                    fill='tozeroy', 
-                    fillcolor='rgba(255, 127, 14, 0.08)',
                     customdata=custom_short_hover,
                     hovertemplate="<b>%{x|%Y-%m-%d}</b><br>短周期动能读数: <b>%{y:.1f}%</b><br>收盘价: ¥%{customdata[0]:.2f}<extra></extra>"
                 ))

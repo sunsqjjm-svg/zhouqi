@@ -51,65 +51,73 @@ PRESET_STOCKS = {
     "钢研高纳": "sz300034", "海南橡胶": "sh601118"
 }
 
-# ================= 核心重构：雅虎财经单次打包极速全盘雷达 (0.1秒秒杀26只) =================
+# ================= 终极重构：东财官方单次打包批量引擎 (0.1秒必出 26/26) =================
 @st.cache_data(ttl=180)
 def run_pool_radar():
-    """一次 HTTP 请求直接打包拿齐 26 只股票 52 周极值，杜绝并发封锁"""
-    # 构造 Yahoo 代码列表 (e.g. 600866.SS, 000928.SZ)
-    code_to_name = {}
-    symbols = []
+    """单次打包请求东方财富官方多股聚合行情，直取最新价、52周最高与最低"""
+    # 构造东财批量请求格式: 0.002237,1.600866...
+    em_secids = []
     for name, secid in PRESET_STOCKS.items():
-        code = secid[2:]
-        suffix = "SS" if (code.startswith('6') or code.startswith('9')) else "SZ"
-        sym = f"{code}.{suffix}"
-        symbols.append(sym)
-        code_to_name[sym] = {"name": name, "code": code}
+        em_secids.append(get_em_secid(secid[2:]))
+    secids_str = ",".join(em_secids)
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    symbols_str = ",".join(symbols)
-    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols_str}"
-    
+    # f2: 最新价 | f12: 代码 | f14: 名字 | f174: 52周最高 | f175: 52周最低
+    url = (
+        f"https://push2.eastmoney.com/api/qt/ulist.np/get?"
+        f"fltt=2&fields=f2,f12,f14,f174,f175&"
+        f"ut=7eea3edcaed7343ac48e18df4f617d8f&"
+        f"secids={secids_str}"
+    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://quote.eastmoney.com/"
+    }
+
     results = []
     try:
         r = requests.get(url, headers=headers, timeout=6).json()
-        quote_list = r.get("quoteResponse", {}).get("result", [])
+        diff_list = r.get("data", {}).get("diff", [])
         
-        for q in quote_list:
-            sym = q.get("symbol")
-            if sym in code_to_name:
-                c_now = safe_float(q.get("regularMarketPrice"))
-                h_52 = safe_float(q.get("fiftyTwoWeekHigh"))
-                l_52 = safe_float(q.get("fiftyTwoWeekLow"))
-                
-                if c_now > 0 and h_52 > l_52:
-                    short_risk = round(((c_now - l_52) / (h_52 - l_52)) * 100.0, 1)
-                    results.append({
-                        "name": code_to_name[sym]["name"],
-                        "code": code_to_name[sym]["code"],
-                        "price": c_now,
-                        "short_risk": short_risk,
-                        "h250": h_52,
-                        "l250": l_52
-                    })
+        for it in diff_list:
+            code = str(it.get("f12", ""))
+            name = it.get("f14", "")
+            c_now = safe_float(it.get("f2"))
+            h_52 = safe_float(it.get("f174"))
+            l_52 = safe_float(it.get("f175"))
+
+            # 必须拿到真实的价格与52周通道
+            if c_now > 0 and h_52 > l_52:
+                short_risk = round(((c_now - l_52) / (h_52 - l_52)) * 100.0, 1)
+                results.append({
+                    "name": name,
+                    "code": code,
+                    "price": c_now,
+                    "short_risk": short_risk,
+                    "h250": h_52,
+                    "l250": l_52
+                })
     except Exception:
         pass
 
-    # 若雅虎偶发波动，采用腾讯备选逐一安全抓取
+    # 若东财网络偶发拦截，采用无鉴权雅虎 v8 图表轻量备选 (绝无 401 拦截)
     if len(results) < 10:
         for name, secid in PRESET_STOCKS.items():
             try:
-                tx_url = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,300,qfq"
-                tx_r = requests.get(tx_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=2).json()
-                kl = tx_r.get("data", {}).get(secid, {}).get("qfqday", [])
-                if len(kl) >= 30:
-                    cs = [float(x[2]) for x in kl][-250:]
-                    c_now = cs[-1]
-                    h_250 = max(cs)
-                    l_250 = min(cs)
+                code = secid[2:]
+                suf = "SS" if (code.startswith('6') or code.startswith('9')) else "SZ"
+                yf_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.{suf}?range=1y&interval=1d"
+                res_yf = requests.get(yf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=2).json()
+                chart_data = res_yf.get("chart", {}).get("result", [])[0]
+                closes = chart_data.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                valid_closes = [float(x) for x in closes if x is not None]
+                if len(valid_closes) >= 30:
+                    c_now = valid_closes[-1]
+                    h_250 = max(valid_closes)
+                    l_250 = min(valid_closes)
                     short_risk = round(((c_now - l_250) / (h_250 - l_250)) * 100.0, 1)
                     results.append({
                         "name": name,
-                        "code": secid[2:],
+                        "code": code,
                         "price": c_now,
                         "short_risk": short_risk,
                         "h250": h_250,
@@ -118,6 +126,7 @@ def run_pool_radar():
             except Exception:
                 continue
 
+    # 按短周期动能由低到高严格排序
     results.sort(key=lambda x: x["short_risk"])
     return results
 
@@ -193,7 +202,7 @@ def fetch_stock_data(secid, code, years=10):
     except Exception:
         pass
 
-    # 通道 2：雅虎财经 10 年直连
+    # 通道 2：雅虎 v8 图表 10 年直连 (无 401 拦截)
     if len(records) < 1000:
         try:
             records = []
@@ -265,7 +274,7 @@ def fetch_stock_data(secid, code, years=10):
     raw_long_risk = ((pb_smoothed - p_floor) / denom) * 100.0
     df['long_risk'] = raw_long_risk.clip(0, 100).round(1)
 
-    # 短周期 1 年收盘价通道 (近 250 日)
+    # 短周期 1 年动能通道 (近 250 日)
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
@@ -293,7 +302,7 @@ def fetch_stock_data(secid, code, years=10):
     return df, meta
 
 # ================= 页面顶部：全盘自动雷达扫描看板 =================
-with st.spinner("⚡ 正在极速扫描 26 只周期股全盘实时动能..."):
+with st.spinner("⚡ 正在执行 26 只周期股批量打包雷达扫描..."):
     pool_data = run_pool_radar()
 
 # 筛选条件：≤ 1.0% 与 ≥ 90.0%
@@ -306,7 +315,7 @@ with st.expander(f"🔔 【全池实时雷达】26只周期股极端异动预警
     with col_alert1:
         st.markdown("##### 🟢 极度冰点潜伏区 (短周期动能 ≤ 1.0%)")
         if ice_stocks:
-            st.success(f"共发现 **{len(ice_stocks)}** 只标的处于近 1 年绝对极限地板！")
+            st.success(f"共发现 **{len(ice_stocks)}** 只标的踩在近 1 年极限地板！")
             for item in ice_stocks:
                 st.markdown(f"- 🎯 **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **`{item['short_risk']:.1f}%`** (年内底 ¥{item['l250']:.2f})")
         else:

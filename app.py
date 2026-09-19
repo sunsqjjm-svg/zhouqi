@@ -51,17 +51,15 @@ PRESET_STOCKS = {
     "钢研高纳": "sz300034", "海南橡胶": "sh601118"
 }
 
-# ================= 终极重构：东财官方单次打包批量引擎 (0.1秒必出 26/26) =================
+# ================= 极速全盘雷达扫描器 =================
 @st.cache_data(ttl=180)
 def run_pool_radar():
     """单次打包请求东方财富官方多股聚合行情，直取最新价、52周最高与最低"""
-    # 构造东财批量请求格式: 0.002237,1.600866...
     em_secids = []
     for name, secid in PRESET_STOCKS.items():
         em_secids.append(get_em_secid(secid[2:]))
     secids_str = ",".join(em_secids)
 
-    # f2: 最新价 | f12: 代码 | f14: 名字 | f174: 52周最高 | f175: 52周最低
     url = (
         f"https://push2.eastmoney.com/api/qt/ulist.np/get?"
         f"fltt=2&fields=f2,f12,f14,f174,f175&"
@@ -85,7 +83,6 @@ def run_pool_radar():
             h_52 = safe_float(it.get("f174"))
             l_52 = safe_float(it.get("f175"))
 
-            # 必须拿到真实的价格与52周通道
             if c_now > 0 and h_52 > l_52:
                 short_risk = round(((c_now - l_52) / (h_52 - l_52)) * 100.0, 1)
                 results.append({
@@ -99,34 +96,6 @@ def run_pool_radar():
     except Exception:
         pass
 
-    # 若东财网络偶发拦截，采用无鉴权雅虎 v8 图表轻量备选 (绝无 401 拦截)
-    if len(results) < 10:
-        for name, secid in PRESET_STOCKS.items():
-            try:
-                code = secid[2:]
-                suf = "SS" if (code.startswith('6') or code.startswith('9')) else "SZ"
-                yf_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.{suf}?range=1y&interval=1d"
-                res_yf = requests.get(yf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=2).json()
-                chart_data = res_yf.get("chart", {}).get("result", [])[0]
-                closes = chart_data.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-                valid_closes = [float(x) for x in closes if x is not None]
-                if len(valid_closes) >= 30:
-                    c_now = valid_closes[-1]
-                    h_250 = max(valid_closes)
-                    l_250 = min(valid_closes)
-                    short_risk = round(((c_now - l_250) / (h_250 - l_250)) * 100.0, 1)
-                    results.append({
-                        "name": name,
-                        "code": code,
-                        "price": c_now,
-                        "short_risk": short_risk,
-                        "h250": h_250,
-                        "l250": l_250
-                    })
-            except Exception:
-                continue
-
-    # 按短周期动能由低到高严格排序
     results.sort(key=lambda x: x["short_risk"])
     return results
 
@@ -202,7 +171,7 @@ def fetch_stock_data(secid, code, years=10):
     except Exception:
         pass
 
-    # 通道 2：雅虎 v8 图表 10 年直连 (无 401 拦截)
+    # 通道 2：雅虎 v8 直连
     if len(records) < 1000:
         try:
             records = []
@@ -251,8 +220,6 @@ def fetch_stock_data(secid, code, years=10):
 
     df = pd.DataFrame(records).set_index("日期").sort_index()
     df = df[~df.index.duplicated(keep='first')]
-
-    # 截断未来脏时间
     df = df[df.index <= datetime.now()]
 
     # 动态 BPS 复合增长模型
@@ -265,8 +232,6 @@ def fetch_stock_data(secid, code, years=10):
 
     # 20日平滑
     pb_smoothed = df['pb'].rolling(window=20, min_periods=1).mean()
-    
-    # 统计周期极值
     p_floor = float(df['pb'].quantile(0.02))
     p_cap = max(float(df['pb'].quantile(0.98)), 1.90)
 
@@ -301,15 +266,15 @@ def fetch_stock_data(secid, code, years=10):
     }
     return df, meta
 
-# ================= 页面顶部：全盘自动雷达扫描看板 =================
-with st.spinner("⚡ 正在执行 26 只周期股批量打包雷达扫描..."):
+# ================= 页面顶部：精炼全盘雷达提醒（已彻底消除重复） =================
+with st.spinner("⚡ 正在执行 26 只周期股批量雷达扫描..."):
     pool_data = run_pool_radar()
 
 # 筛选条件：≤ 1.0% 与 ≥ 90.0%
 ice_stocks = [x for x in pool_data if x["short_risk"] <= 1.0]
 fire_stocks = [x for x in pool_data if x["short_risk"] >= 90.0]
 
-with st.expander(f"🔔 【全池实时雷达】26只周期股极端异动预警 (已扫描 {len(pool_data)}/26 只标的)", expanded=True):
+with st.expander(f"🔔 【全池实时雷达】26只周期股极端异动提醒 (已扫描 {len(pool_data)}/26 只标的)", expanded=True):
     col_alert1, col_alert2 = st.columns(2)
     
     with col_alert1:
@@ -319,7 +284,7 @@ with st.expander(f"🔔 【全池实时雷达】26只周期股极端异动预警
             for item in ice_stocks:
                 st.markdown(f"- 🎯 **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **`{item['short_risk']:.1f}%`** (年内底 ¥{item['l250']:.2f})")
         else:
-            st.info("暂无标的绝对踩在 ≤1.0% 地板上。")
+            st.info("暂无标的处于 ≤1.0% 极限地板上。")
 
     with col_alert2:
         st.markdown("##### 🔴 极度过热高危区 (短周期动能 ≥ 90.0%)")
@@ -328,23 +293,7 @@ with st.expander(f"🔔 【全池实时雷达】26只周期股极端异动预警
             for item in fire_stocks:
                 st.markdown(f"- 🚨 **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **`{item['short_risk']:.1f}%`** (年内顶 ¥{item['h250']:.2f})")
         else:
-            st.info("暂无标的处于 ≥90.0% 的极度过热区。")
-
-    # 全盘实时动能透明排行榜
-    if pool_data:
-        st.markdown("---")
-        st.caption(f"🔍 **全池动能排查清单（成功获取到 {len(pool_data)} 只真实数据）：**")
-        p_c1, p_c2 = st.columns(2)
-        with p_c1:
-            st.markdown("**【当前最便宜 / 动能最低 TOP 3】**：")
-            for rank_i, it in enumerate(pool_data[:3], 1):
-                flag = " 🎯 触发极寒！" if it["short_risk"] <= 1.0 else ""
-                st.markdown(f"{rank_i}. **{it['name']}** (`{it['code']}`): 动能 **`{it['short_risk']:.1f}%`** (现价 ¥{it['price']:.2f}){flag}")
-        with p_c2:
-            st.markdown("**【当前最昂贵 / 动能最高 TOP 3】**：")
-            for rank_i, it in enumerate(pool_data[-3:][::-1], 1):
-                flag = " 🚨 触发过热！" if it["short_risk"] >= 90.0 else ""
-                st.markdown(f"{rank_i}. **{it['name']}** (`{it['code']}`): 动能 **`{it['short_risk']:.1f}%`** (现价 ¥{it['price']:.2f}){flag}")
+            st.info("暂无标的处于 ≥90.0% 极度过热区。")
 
     if st.button("🔄 立即强制刷新全池数据缓存"):
         st.cache_data.clear()

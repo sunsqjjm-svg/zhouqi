@@ -52,27 +52,33 @@ PRESET_STOCKS = {
     "钢研高纳": "sz300034", "海南橡胶": "sh601118"
 }
 
-# ================= 全池 26 只股票并发极速扫描器 (<1% 与 >90%) =================
+# ================= 修复：与个股详情页 100% 口径统一的极速扫描器 =================
 def scan_single_stock(name, secid):
-    """单只股票快速抓取近 250 日通道并计算短周期动能"""
+    """单只股票快速抓取近 250 日收盘价通道，计算绝对一致的短周期动能"""
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com"}
     url = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,300,qfq"
     try:
-        r = requests.get(url, headers=headers, timeout=4).json()
+        r = requests.get(url, headers=headers, timeout=5).json()
         data = r.get("data", {}).get(secid, {})
         klines = data.get("qfqday") or data.get("day") or []
+        
+        # 严格过滤未来脏时间
+        today_s = datetime.now().strftime("%Y-%m-%d")
+        klines = [x for x in klines if str(x[0])[:10] <= today_s]
+        
         if len(klines) >= 30:
+            # 【核心修复】：严格取收盘价序列计算，彻底消除盘中最高最低价造成的口径误差
             closes = [float(x[2]) for x in klines]
-            highs = [float(x[3]) for x in klines]
-            lows = [float(x[4]) for x in klines]
-            
-            # 最近 250 日（或实际长度）
             c_now = closes[-1]
-            h_250 = max(highs[-250:])
-            l_250 = min(lows[-250:])
+            
+            # 近 250 个交易日收盘极值
+            c_window = closes[-250:]
+            h_250 = max(c_window)
+            l_250 = min(c_window)
             
             denom = h_250 - l_250 if h_250 > l_250 else 1.0
             short_risk = round(((c_now - l_250) / denom) * 100.0, 1)
+            
             return {
                 "name": name,
                 "code": secid[2:],
@@ -85,7 +91,7 @@ def scan_single_stock(name, secid):
         pass
     return None
 
-@st.cache_data(ttl=300) # 5分钟缓存一次全池结果，秒级加载
+@st.cache_data(ttl=300)
 def run_pool_radar():
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -94,6 +100,8 @@ def run_pool_radar():
             res = future.result()
             if res:
                 results.append(res)
+    # 按短周期动能从小到大排序
+    results.sort(key=lambda x: x["short_risk"])
     return results
 
 @st.cache_data(ttl=86400)
@@ -142,7 +150,7 @@ def fetch_stock_data(secid, code, years=10):
 
     records = []
 
-    # 通道 1：东财 10 年高精度 K 线 (带 ut 授权)
+    # 通道 1：东财 10 年高精度 K 线
     try:
         em_id = get_em_secid(code)
         em_url = (
@@ -168,7 +176,7 @@ def fetch_stock_data(secid, code, years=10):
     except Exception:
         pass
 
-    # 通道 2：雅虎财经 10 年前复权直连
+    # 通道 2：雅虎财经 10 年直连
     if len(records) < 1000:
         try:
             records = []
@@ -240,7 +248,7 @@ def fetch_stock_data(secid, code, years=10):
     raw_long_risk = ((pb_smoothed - p_floor) / denom) * 100.0
     df['long_risk'] = raw_long_risk.clip(0, 100).round(1)
 
-    # 短周期 1 年动能通道 (近 250 日)
+    # 短周期 1 年收盘价通道 (近 250 日)
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
@@ -267,11 +275,11 @@ def fetch_stock_data(secid, code, years=10):
     }
     return df, meta
 
-# ================= 页面顶部：自动全盘雷达扫描预警 =================
-with st.spinner("⚡ 正在全自动扫描 26 只周期股极值异动..."):
+# ================= 页面顶部：全池自动雷达扫描看板 =================
+with st.spinner("⚡ 正在全自动扫描 26 只周期股实时动能极值..."):
     pool_data = run_pool_radar()
 
-# 筛选条件：小于 1.0% 或 大于 90.0%
+# 筛选条件：≤ 1.0% 与 ≥ 90.0%
 ice_stocks = [x for x in pool_data if x["short_risk"] <= 1.0]
 fire_stocks = [x for x in pool_data if x["short_risk"] >= 90.0]
 
@@ -281,30 +289,49 @@ with st.expander("🔔 【全池实时扫描】26只周期股极端异动提醒 
     with col_alert1:
         st.markdown("##### 🟢 极度冰点潜伏区 (短周期动能 ≤ 1.0%)")
         if ice_stocks:
-            st.success(f"共发现 **{len(ice_stocks)}** 只标的被砸进近 1 年绝对极限地板！")
+            st.success(f"共发现 **{len(ice_stocks)}** 只标的处于近 1 年绝对极限地板！")
             for item in ice_stocks:
-                st.markdown(f"- **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **{item['short_risk']:.1f}%** (处于年内最低点 ¥{item['l250']:.2f})")
+                st.markdown(f"- **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **{item['short_risk']:.1f}%** (处于年内最低收盘 ¥{item['l250']:.2f})")
         else:
-            st.info("暂无标的处于 ≤1.0% 的极端地板冰点。")
+            st.info("暂无标的绝对踩在 ≤1.0% 上。")
 
     with col_alert2:
         st.markdown("##### 🔴 极度过热高危区 (短周期动能 ≥ 90.0%)")
         if fire_stocks:
             st.error(f"共发现 **{len(fire_stocks)}** 只标的摸到近 1 年天花板，获利盘极度拥挤！")
             for item in fire_stocks:
-                st.markdown(f"- **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **{item['short_risk']:.1f}%** (贴近天花板 ¥{item['h250']:.2f})")
+                st.markdown(f"- **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **{item['short_risk']:.1f}%** (贴近年内最高收盘 ¥{item['h250']:.2f})")
         else:
             st.info("暂无标的处于 ≥90.0% 的极度泡沫过热区。")
+
+    # 核心新增：明细透明榜单（解决为什么没看到的问题）
+    if pool_data:
+        st.markdown("---")
+        st.caption("🔍 **全池动能极值排行（实时排查明细）：**")
+        p_c1, p_c2 = st.columns(2)
+        with p_c1:
+            st.markdown("**【当前最便宜 / 动能最低 TOP 3】**：")
+            for rank_i, it in enumerate(pool_data[:3], 1):
+                badge = " 🎯 触发极寒！" if it["short_risk"] <= 1.0 else ""
+                st.markdown(f"{rank_i}. **{it['name']}** (`{it['code']}`): 动能 **`{it['short_risk']:.1f}%`** (现价 ¥{it['price']:.2f}){badge}")
+        with p_c2:
+            st.markdown("**【当前最昂贵 / 动能最高 TOP 3】**：")
+            for rank_i, it in enumerate(pool_data[-3:][::-1], 1):
+                badge = " 🚨 触发过热！" if it["short_risk"] >= 90.0 else ""
+                st.markdown(f"{rank_i}. **{it['name']}** (`{it['code']}`): 动能 **`{it['short_risk']:.1f}%`** (现价 ¥{it['price']:.2f}){badge}")
+
+    # 快捷刷新缓存按钮
+    if st.button("🔄 立即强制刷新全池数据缓存"):
+        st.cache_data.clear()
+        st.rerun()
 
 # --- 侧边栏交互 ---
 with st.sidebar:
     st.header("⚙️ 标的诊断设置")
     
-    # 下拉快捷选择（26只精选池）
     stock_names = list(PRESET_STOCKS.keys())
     dropdown_pick = st.selectbox("📌 26只经典周期股快捷直选：", ["-- 点击下拉选择 --"] + stock_names)
 
-    # 折叠式 2 列按钮面板
     preset_btn = None
     with st.expander("📂 展开 26 只周期股按钮网格", expanded=False):
         col1, col2 = st.columns(2)
@@ -313,7 +340,7 @@ with st.sidebar:
             if target_col.button(sname, key=f"btn_{idx}", use_container_width=True):
                 preset_btn = sname
 
-    selected_target = "中钢国际"
+    selected_target = "星湖科技" if "星湖科技" in stock_names else "中钢国际"
     if dropdown_pick != "-- 点击下拉选择 --":
         selected_target = dropdown_pick
     elif preset_btn:
@@ -346,7 +373,7 @@ if user_input:
 
             st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`，已载入近 **{actual_span} 年** 完整大周期数据)")
 
-            # 最新指标
+            # 最新分项指标
             long_risk = df['long_risk'].iloc[-1]
             short_risk = df['short_risk'].iloc[-1]
             risk_score = df['risk_score'].iloc[-1]

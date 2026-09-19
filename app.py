@@ -9,7 +9,7 @@ from datetime import datetime
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜长短周期分离对账与共振判定")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜严谨全局估值分位")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -62,12 +62,12 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 实时行情与历史连续数据拉取
+# 3. 彻底重构：腾讯官方权威前复权日 K 线与行情（消除日期穿越与虚假分位）
 @st.cache_data(ttl=1800)
 def fetch_stock_data(secid, years=4):
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com"}
     
-    # 腾讯实时行情
+    # 实时行情 (腾讯)
     r_q = requests.get(f"https://qt.gtimg.cn/q={secid}", headers=headers, timeout=6)
     r_q.encoding = "gbk"
     parts = r_q.text.split('="')[1].split('~')
@@ -79,19 +79,22 @@ def fetch_stock_data(secid, years=4):
     curr_pe_dyn = safe_float(parts[52]) if len(parts) > 52 else 0.0 # 动态市盈率
     curr_pb = safe_float(parts[46], default=1.0) # 市净率PB
 
-    # 历史日K线 (新浪财经)
-    datalen = min(years * 250, 1020)
-    k_url = f"https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol={secid}&scale=240&ma=no&datalen={datalen}"
-    r_k = requests.get(k_url, headers={"Referer": "https://finance.sina.com.cn"}, timeout=8)
-    kline_data = r_k.json()
+    # 腾讯官方前复权日K线接口 (格式严谨为 YYYY-MM-DD，决无未来年份)
+    req_num = min(years * 250, 1000)
+    k_url = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,{req_num},qfq"
+    r_k = requests.get(k_url, headers=headers, timeout=8)
+    k_res = r_k.json()
+    
+    stock_data = k_res.get("data", {}).get(secid, {})
+    kline_list = stock_data.get("qfqday") or stock_data.get("day") or []
     
     records = []
-    for item in kline_data:
+    for item in kline_list:
         records.append({
-            "日期": pd.to_datetime(item["day"]),
-            "收盘": float(item["close"]),
-            "最高": float(item["high"]),
-            "最低": float(item["low"])
+            "日期": datetime.strptime(item[0], "%Y-%m-%d"),
+            "收盘": float(item[2]),
+            "最高": float(item[3]),
+            "最低": float(item[4])
         })
     df = pd.DataFrame(records).set_index("日期").sort_index()
 
@@ -99,16 +102,16 @@ def fetch_stock_data(secid, years=4):
     bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     df['pb'] = (df['收盘'] / bps).round(2)
 
-    # ================= 核心计算：长周期 vs 短周期风险完全分离 =================
-    # 1. 长周期风险曲线：历史 PB 分位 (0~100)
-    df['long_risk'] = (df['pb'].expanding(min_periods=30).rank(pct=True) * 100.0).round(1)
+    # ================= 修复核心：全局周期真实分位数 (消灭虚高 80%) =================
+    # 在 4 年真实估值大池中计算每日真实位置，横盘股绝不再虚高
+    df['long_risk'] = (df['pb'].rank(pct=True) * 100.0).round(1)
     
-    # 2. 短周期风险曲线：近 1 年价格通道相对位置 (0~100)
+    # 短周期价格通道 (近 250 日动能)
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
 
-    # 3. 综合加权读数 (用于整体研判)
+    # 综合加权读数
     df['risk_score'] = (0.7 * df['long_risk'] + 0.3 * df['short_risk']).clip(0, 100).round(1)
 
     meta = {
@@ -141,7 +144,7 @@ with st.sidebar:
 
 # --- 主逻辑计算 ---
 if user_input:
-    with st.spinner(f"正在全网拉取「{user_input}」长短周期数据..."):
+    with st.spinner(f"正在拉取「{user_input}」权威真实行情与估值中枢..."):
         info = search_stock(user_input)
 
     if not info:
@@ -159,7 +162,7 @@ if user_input:
             
             st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`)")
 
-            # 最新分项指标
+            # 最新指标取自序列末尾
             long_risk = df['long_risk'].iloc[-1]
             short_risk = df['short_risk'].iloc[-1]
             risk_score = df['risk_score'].iloc[-1]
@@ -173,23 +176,23 @@ if user_input:
                 is_roe_declining = True
                 is_roe_rebounding = False
                 roe_desc = f"公司处于净亏损状态（ROE为 {real_roe:.2f}%），行业正在经历惨烈的产能出清‘毒打’。"
-            elif real_roe < 5.0:
+            elif real_roe < 6.0:
                 roe_status = "📉 处于下行末端 / 低谷冰点期"
                 is_roe_declining = True
                 is_roe_rebounding = False
-                roe_desc = f"ROE 处于微利冰点（{real_roe:.2f}%），盈利恶化趋缓，处于出清磨底期。"
+                roe_desc = f"ROE 处于低谷冰点（{real_roe:.2f}%），盈利恶化趋缓，处于出清磨底期。"
             elif pe_dyn > 0 and pe_dyn < pe_ttm * 0.90:
                 roe_status = "📈 见底反弹中 / 业绩转好"
                 is_roe_declining = False
                 is_roe_rebounding = True
-                roe_desc = "最新季度业绩强劲改善，ROE 步入向上通道，走势进入半山腰。"
+                roe_desc = "最新季度业绩出现改善，ROE 步入回升通道，走势进入半山腰。"
             else:
                 roe_status = "⚖️ 处于中性常态阶段"
                 is_roe_declining = False
                 is_roe_rebounding = False
                 roe_desc = "盈利水平处于常态化波动区间。"
 
-            # 周期位置核心裁决（严谨判断）
+            # 周期位置核心裁决
             if long_risk >= 85 and short_risk >= 85:
                 stage = "🔴 周期大顶：长短周期同时触顶 (双共振清仓)"
                 guidance = "长周期估值泡沫化 + 短周期情绪极限超买！触发作者最高级别大顶预警，坚决分批离场防 40%+ 级暴跌！"
@@ -215,13 +218,13 @@ if user_input:
             # ================= 视图展示 =================
             st.subheader(f"📌 周期裁决：{stage}")
 
-            # 4 个独立指标卡：彻底把长短周期分开
+            # 4 个独立指标卡
             st.markdown("#### ⚡ 长短周期独立读数与核心信号")
             c1, c2, c3, c4 = st.columns(4)
             
             with c1:
                 st.metric("信号 1：PB 估值位置", f"{curr_pb:.2f}")
-                st.caption(f"当前市净率绝对值")
+                st.caption("当前市净率绝对值")
 
             with c2:
                 st.metric("信号 2：真实 ROE 状态", f"{real_roe:.2f} %", delta="净亏损" if real_roe<0 else "盈利", delta_color="inverse")
@@ -231,7 +234,7 @@ if user_input:
                 st.metric("🔵 长周期风险读数 (PB分位)", f"{long_risk:.1f} %", 
                           delta="大底机会" if long_risk<=25 else ("高估泡沫" if long_risk>=85 else "中性"),
                           delta_color="inverse" if long_risk>=85 else "normal")
-                st.caption("基于3~5年产业资本重置估值")
+                st.caption("基于4年全局资本重置估值")
 
             with c4:
                 st.metric("🟠 短周期风险读数 (1年动能)", f"{short_risk:.1f} %", 
@@ -255,7 +258,7 @@ if user_input:
             > *盈利状态解析*：{roe_desc}
             """)
 
-            # ================= 图表部分：彻底分开长短周期曲线 =================
+            # ================= 图表部分 =================
             st.markdown("### 📊 长短周期风险走势独立图表")
             
             tab1, tab2, tab3 = st.tabs(["🔀 双周期同框对比曲线", "🔵 仅看长周期估值风险 (PB分位)", "🟠 仅看短周期动能风险 (价格通道)"])
@@ -272,26 +275,26 @@ if user_input:
                 fig_both.add_hrect(y0=0, y1=20, fillcolor="rgba(0, 255, 0, 0.05)", line_width=0)
 
                 fig_both.update_layout(height=400, margin=dict(l=20, r=20, t=30, b=20),
-                                       xaxis_title="日期", yaxis_title="风险读数 (%)", yaxis=dict(range=[0, 105]),
+                                       xaxis_title="真实交易日期", yaxis_title="风险读数 (%)", yaxis=dict(range=[0, 105]),
                                        hovermode="x unified")
                 st.plotly_chart(fig_both, use_container_width=True)
 
             with tab2:
-                st.caption("长周期估值风险：反映 3~5 年资本重置与估值中枢迁移（走势平稳、决定大方向）。")
+                st.caption("长周期估值风险：反映 4 年全局真实估值中枢迁移。横盘期平稳运行，唯有真正牛市暴涨时才会触及高位。")
                 fig_long = go.Figure()
                 fig_long.add_trace(go.Scatter(x=df.index, y=df['long_risk'], name="长周期估值风险", line=dict(color="#1f77b4", width=2.5), fill='tozeroy', fillcolor='rgba(31, 119, 180, 0.08)'))
                 fig_long.add_hline(y=85, line_dash="dash", line_color="red", annotation_text="长线高估警戒 (85%)")
                 fig_long.add_hline(y=25, line_dash="dash", line_color="green", annotation_text="长线大底低估 (25%)")
-                fig_long.update_layout(height=360, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="日期", yaxis_title="长周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
+                fig_long.update_layout(height=360, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="真实交易日期", yaxis_title="长周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
                 st.plotly_chart(fig_long, use_container_width=True)
 
             with tab3:
-                st.caption("短周期动能风险：反映近 1 年二级市场价格超买/超卖水温（波动剧烈、捕捉短线极值）。")
+                st.caption("短周期动能风险：反映近 1 年二级市场价格超买/超卖水温（捕捉波段顶底）。")
                 fig_short = go.Figure()
                 fig_short.add_trace(go.Scatter(x=df.index, y=df['short_risk'], name="短周期动能风险", line=dict(color="#ff7f0e", width=2), fill='tozeroy', fillcolor='rgba(255, 127, 14, 0.08)'))
                 fig_short.add_hline(y=90, line_dash="dash", line_color="red", annotation_text="短线极度超买 (90%)")
                 fig_short.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="短线极度超卖 (20%)")
-                fig_short.update_layout(height=360, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="日期", yaxis_title="短周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
+                fig_short.update_layout(height=360, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="真实交易日期", yaxis_title="短周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
                 st.plotly_chart(fig_short, use_container_width=True)
 
             # ================= 图表二：PB 估值通道 =================
@@ -302,7 +305,7 @@ if user_input:
             pb_tp = df['pb'].quantile(0.90)
             fig_pb.add_hline(y=pb_bot, line_dash="dash", line_color="green", annotation_text="PB 大底线 (15%分位)")
             fig_pb.add_hline(y=pb_tp, line_dash="dash", line_color="red", annotation_text="高位警戒线 (90%分位)")
-            fig_pb.update_layout(height=360, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="日期", yaxis_title="PB (市净率)", hovermode="x unified")
+            fig_pb.update_layout(height=360, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="真实交易日期", yaxis_title="PB (市净率)", hovermode="x unified")
             st.plotly_chart(fig_pb, use_container_width=True)
 
             # ================= 模块：作者同款 Tushare 极值对账 =================

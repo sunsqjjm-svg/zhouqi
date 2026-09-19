@@ -236,7 +236,7 @@ with st.sidebar:
                 preset_btn = sname
 
     # 确定当前选择项
-    selected_target = "中钢国际" # 初始默认值
+    selected_target = "中钢国际"
     if dropdown_pick != "-- 点击下拉选择 --":
         selected_target = dropdown_pick
     elif preset_btn:
@@ -365,44 +365,53 @@ if user_input:
             > *盈利状态解析*：{roe_desc}
             """)
 
-            # ================= 图表部分：彻底分离两大视角 =================
-            st.markdown("### 📊 长短周期风险走势独立图表")
+            # ================= 图表部分：彻底消除重复，双视角精简 =================
+            st.markdown("### 📊 长短周期独立图表（已融合绝对PB与股价提示）")
             
             tab_long, tab_short = st.tabs(["🔵 10年长周期估值风险 (宏观中枢)", "🟠 近2年短周期动能风险 (战术波段)"])
 
             with tab_long:
-                st.caption(f"10年动态估值中枢（底部PB {pb_floor:.2f} ~ 顶部PB {pb_cap:.2f}）。基于 10 年大视野，横盘期真实贴地，唯有真正牛市暴涨才会触顶。")
+                st.caption(f"10年动态估值中枢（底部PB {pb_floor:.2f} ~ 顶部PB {pb_cap:.2f}）。鼠标滑过可同时查看【风险读数】与【真实市净率PB】。")
+                
+                # 构建悬停复合数据矩阵：同时绑定风险读数、真实PB、真实收盘价
+                custom_hover = np.stack((df['pb'], df['收盘']), axis=-1)
+                
                 fig_long = go.Figure()
-                fig_long.add_trace(go.Scatter(x=df.index, y=df['long_risk'], name="10年长周期风险", line=dict(color="#1f77b4", width=2.5), fill='tozeroy', fillcolor='rgba(31, 119, 180, 0.08)'))
+                fig_long.add_trace(go.Scatter(
+                    x=df.index, y=df['long_risk'], 
+                    name="10年长周期风险", 
+                    line=dict(color="#1f77b4", width=2.5), 
+                    fill='tozeroy', 
+                    fillcolor='rgba(31, 119, 180, 0.08)',
+                    customdata=custom_hover,
+                    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>长周期风险读数: <b>%{y:.1f}%</b><br>对应市净率 PB: %{customdata[0]:.2f}<br>收盘价: ¥%{customdata[1]:.2f}<extra></extra>"
+                ))
                 fig_long.add_hline(y=85, line_dash="dash", line_color="red", annotation_text="长线高估警戒 (85%)")
                 fig_long.add_hline(y=25, line_dash="dash", line_color="green", annotation_text="长线大底低估 (25%)")
-                fig_long.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="真实交易日期 (近10年)", yaxis_title="长周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
+                fig_long.update_layout(height=390, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近10年宏观大视野)", yaxis_title="长周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
                 st.plotly_chart(fig_long, use_container_width=True)
 
             with tab_short:
                 st.caption("短周期动能风险：仅精准截取近 2 年（730天）二级市场交易水温，聚焦当下战术波段买卖点。")
                 
-                # 严格只截取最近 2 年数据
                 two_years_cutoff = df.index[-1] - timedelta(days=730)
                 df_short = df[df.index >= two_years_cutoff]
+                custom_short_hover = np.stack((df_short['收盘'],), axis=-1)
                 
                 fig_short = go.Figure()
-                fig_short.add_trace(go.Scatter(x=df_short.index, y=df_short['short_risk'], name="近2年短周期动能", line=dict(color="#ff7f0e", width=2), fill='tozeroy', fillcolor='rgba(255, 127, 14, 0.08)'))
+                fig_short.add_trace(go.Scatter(
+                    x=df_short.index, y=df_short['short_risk'], 
+                    name="近2年短周期动能", 
+                    line=dict(color="#ff7f0e", width=2), 
+                    fill='tozeroy', 
+                    fillcolor='rgba(255, 127, 14, 0.08)',
+                    customdata=custom_short_hover,
+                    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>短周期动能读数: <b>%{y:.1f}%</b><br>收盘价: ¥%{customdata[0]:.2f}<extra></extra>"
+                ))
                 fig_short.add_hline(y=90, line_dash="dash", line_color="red", annotation_text="短线极度超买 (90%)")
                 fig_short.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="短线极度超卖 (20%)")
-                fig_short.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近2年高清视角)", yaxis_title="短周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
+                fig_short.update_layout(height=390, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近2年高清视角)", yaxis_title="短周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
                 st.plotly_chart(fig_short, use_container_width=True)
-
-            # ================= 图表二：10年 PB 估值通道 =================
-            st.markdown("### 📈 图表二：10年 PB 绝对估值通道走势")
-            fig_pb = go.Figure()
-            fig_pb.add_trace(go.Scatter(x=df.index, y=df['pb'], name="PB 走势", line=dict(color="#2ca02c", width=2)))
-            pb_bot = df['pb'].quantile(0.15)
-            pb_tp = df['pb'].quantile(0.90)
-            fig_pb.add_hline(y=pb_bot, line_dash="dash", line_color="green", annotation_text="10年大底线 (15%分位)")
-            fig_pb.add_hline(y=pb_tp, line_dash="dash", line_color="red", annotation_text="10年高位线 (90%分位)")
-            fig_pb.update_layout(height=360, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="真实交易日期 (近10年)", yaxis_title="PB (市净率)", hovermode="x unified")
-            st.plotly_chart(fig_pb, use_container_width=True)
 
             # ================= 模块：作者同款 Tushare 极值对账 =================
             st.markdown("### 📋 周期极值回溯对账（复现作者复盘方法）")

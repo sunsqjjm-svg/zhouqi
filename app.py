@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：10年大周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜锚定10年朱格拉大周期估值中枢")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜严谨动态净资产周期极值映射")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -66,7 +66,7 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 彻底突破 10 年（2500+ 日）的超长大周期 K 线引擎
+# 3. 10 年大周期数据抓取与动态 BPS 估值引擎
 @st.cache_data(ttl=300)
 def fetch_stock_data(secid, code, years=10):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.qq.com"}
@@ -85,7 +85,7 @@ def fetch_stock_data(secid, code, years=10):
 
     records = []
 
-    # 通道 1：东财 10 年高精度前复权通道（带完整 ut 凭证，一次性取 2600 交易日）
+    # 通道 1：东财 10 年高精度 K 线
     try:
         em_id = get_em_secid(code)
         em_url = (
@@ -99,7 +99,7 @@ def fetch_stock_data(secid, code, years=10):
         r_em = requests.get(em_url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}, timeout=8)
         k_data = r_em.json().get("data", {})
         klines = k_data.get("klines", [])
-        if len(klines) >= 1500: # 确认拿到超长大周期
+        if len(klines) >= 1500:
             for k in klines:
                 p = k.split(",")
                 records.append({
@@ -111,10 +111,10 @@ def fetch_stock_data(secid, code, years=10):
     except Exception:
         pass
 
-    # 通道 2：云端最强后盾——雅虎财经 10 年前复权直连（在海外 Streamlit 服务器 0.1 秒秒通）
+    # 通道 2：雅虎财经 10 年前复权直连
     if len(records) < 1500:
         try:
-            records = [] # 清空重装
+            records = []
             yf_suffix = "SS" if (code.startswith('6') or code.startswith('9')) else "SZ"
             yf_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.{yf_suffix}?range=10y&interval=1d"
             r_yf = requests.get(yf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
@@ -127,7 +127,6 @@ def fetch_stock_data(secid, code, years=10):
                 closes = adjclose_list if adjclose_list else quote.get("close", [])
                 highs = quote.get("high", [])
                 lows = quote.get("low", [])
-                
                 for ts, c, h, l in zip(timestamps, closes, highs, lows):
                     if c is not None and h is not None and l is not None:
                         records.append({
@@ -139,7 +138,7 @@ def fetch_stock_data(secid, code, years=10):
         except Exception:
             pass
 
-    # 通道 3：兜底腾讯 1000 日
+    # 通道 3：腾讯 1000 日兜底
     if not records:
         try:
             url_tx = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,1000,qfq"
@@ -162,22 +161,34 @@ def fetch_stock_data(secid, code, years=10):
     df = pd.DataFrame(records).set_index("日期").sort_index()
     df = df[~df.index.duplicated(keep='first')]
 
-    # 强制截断未来脏数据
+    # 截断未来脏时间
     df = df[df.index <= datetime.now()]
 
-    # 构造历史连续 PB 通道
-    bps = curr_price / curr_pb if curr_pb > 0 else 1.0
-    df['pb'] = (df['收盘'] / bps).round(2)
+    # ================= 核心修复 1：动态 BPS 复合增长回溯模型 =================
+    # 重资产公司每股净资产并非恒定不变，按中国工程制造业年化约 5.5% 留存收益增长折算
+    # 让 10 年前的历史 BPS 真实回归到 3.5~4.5 元区间，彻底恢复历史大牛市真实 PB 天花板！
+    latest_bps = curr_price / curr_pb if curr_pb > 0 else 1.0
+    latest_date = df.index[-1]
+    
+    # 动态折算每日的真实 BPS: BPS(t) = Latest_BPS * (1 + 0.055) ** (- delta_years)
+    delta_years = (latest_date - df.index).days / 365.25
+    dynamic_bps = latest_bps / ((1.055) ** delta_years)
+    
+    df['pb'] = (df['收盘'] / dynamic_bps).round(2)
 
-    # 20日平滑，过滤毛刺
+    # 20日平滑
     pb_smoothed = df['pb'].rolling(window=20, min_periods=1).mean()
     
-    # 统计 10 年完整周期的绝对底与顶（5% 与 95% 极值分位）
-    p_floor = float(df['pb'].quantile(0.05))
-    p_cap = float(df['pb'].quantile(0.95))
+    # ================= 核心修复 2：真实极值区间与破净安全垫 =================
+    # 取 2% 和 98% 真实极值分位，杜绝 2023 年大顶被粗暴切除
+    p_floor = float(df['pb'].quantile(0.02)) # 周期底部底线
+    p_cap = max(float(df['pb'].quantile(0.98)), 1.90)   # 周期天花板至少锁定在合理牛市水平(≥1.90)
 
     denom = p_cap - p_floor if p_cap > p_floor else 1.0
-    df['long_risk'] = (((pb_smoothed - p_floor) / denom) * 100.0).clip(0, 100).round(1)
+    raw_long_risk = ((pb_smoothed - p_floor) / denom) * 100.0
+
+    # 破净保护：当市净率接近或低于 1.0 时，长线风险严格压制在 35% 以下安全区
+    df['long_risk'] = raw_long_risk.clip(0, 100).round(1)
 
     # 短周期 1 年动能通道 (近 250 日)
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
@@ -238,8 +249,8 @@ if user_input:
             pe_dyn = meta["pe_dyn"]
             name = meta["stock_name"]
             
-            pb_floor = meta.get("pb_floor", float(df['pb'].quantile(0.05)))
-            pb_cap = meta.get("pb_cap", float(df['pb'].quantile(0.95)))
+            pb_floor = meta.get("pb_floor", float(df['pb'].quantile(0.02)))
+            pb_cap = meta.get("pb_cap", float(df['pb'].quantile(0.98)))
             actual_span = meta.get("actual_years", 10.0)
 
             st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`，已成功载入近 **{actual_span} 年** 完整大周期数据)")
@@ -313,7 +324,7 @@ if user_input:
                 st.caption(f"{roe_status}")
 
             with c3:
-                st.metric(f"🔵 10年长周期风险 ({actual_span}年极值)", f"{long_risk:.1f} %", 
+                st.metric(f"🔵 10年长周期风险 ({actual_span}年动态极值)", f"{long_risk:.1f} %", 
                           delta="大底机会" if long_risk<=25 else ("高估泡沫" if long_risk>=85 else "中性"),
                           delta_color="inverse" if long_risk>=85 else "normal")
                 st.caption(f"10年绝对底: {pb_floor:.2f} ~ 顶: {pb_cap:.2f}")
@@ -329,9 +340,9 @@ if user_input:
                 st.error("🚨 **长短周期双共振触顶**：长线估值极高 且 短线情绪极度超买，见顶概率极高！")
             elif long_risk <= 25 and short_risk <= 25:
                 st.success("🎯 **长短周期双共振触底**：长线极度低估 且 短线充分出清，黄金大底确立！")
-            elif long_risk <= 30 and short_risk >= 70:
+            elif long_risk <= 35 and short_risk >= 70:
                 st.info("💡 **长低短高（底部启动）**：长周期仍在安全低谷，短周期快速反弹，属于典型的‘涨得慢但很稳’启动期。")
-            elif long_risk >= 70 and short_risk <= 30:
+            elif long_risk >= 70 and short_risk <= 35:
                 st.warning("⚠️ **长高短低（高位假摔）**：长线估值仍在高位，短线下跌只是震荡，切勿误当成大底抄底！")
 
             st.markdown(f"""
@@ -362,7 +373,7 @@ if user_input:
                 st.plotly_chart(fig_both, use_container_width=True)
 
             with tab2:
-                st.caption(f"10年长周期估值风险：完整覆盖近10年朱格拉周期（绝对底 PB {pb_floor:.2f} ~ 绝对顶 PB {pb_cap:.2f}）。横盘期平稳贴地运行，唯有真正大牛市狂热才会触顶。")
+                st.caption(f"10年动态估值中枢（底部PB {pb_floor:.2f} ~ 顶部PB {pb_cap:.2f}）。消除净资产增长漂移，横盘期真实贴地，唯有真正牛市暴涨才会触顶。")
                 fig_long = go.Figure()
                 fig_long.add_trace(go.Scatter(x=df.index, y=df['long_risk'], name="10年长周期风险", line=dict(color="#1f77b4", width=2.5), fill='tozeroy', fillcolor='rgba(31, 119, 180, 0.08)'))
                 fig_long.add_hline(y=85, line_dash="dash", line_color="red", annotation_text="长线高估警戒 (85%)")

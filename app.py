@@ -62,7 +62,7 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 彻底重构：腾讯官方权威前复权日 K 线与行情（消除日期穿越与虚假分位）
+# 3. 彻底防御：具备容错备选的高可用 K 线获取引擎
 @st.cache_data(ttl=1800)
 def fetch_stock_data(secid, years=4):
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com"}
@@ -79,34 +79,64 @@ def fetch_stock_data(secid, years=4):
     curr_pe_dyn = safe_float(parts[52]) if len(parts) > 52 else 0.0 # 动态市盈率
     curr_pb = safe_float(parts[46], default=1.0) # 市净率PB
 
-    # 腾讯官方前复权日K线接口 (格式严谨为 YYYY-MM-DD，决无未来年份)
     req_num = min(years * 250, 1000)
-    k_url = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,{req_num},qfq"
-    r_k = requests.get(k_url, headers=headers, timeout=8)
-    k_res = r_k.json()
-    
-    stock_data = k_res.get("data", {}).get(secid, {})
-    kline_list = stock_data.get("qfqday") or stock_data.get("day") or []
-    
     records = []
-    for item in kline_list:
-        records.append({
-            "日期": datetime.strptime(item[0], "%Y-%m-%d"),
-            "收盘": float(item[2]),
-            "最高": float(item[3]),
-            "最低": float(item[4])
-        })
+
+    # 通道 1：腾讯官方前复权接口（严格防御类型判定）
+    try:
+        k_url = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,{req_num},qfq"
+        r_k = requests.get(k_url, headers=headers, timeout=6)
+        k_res = r_k.json()
+        
+        if isinstance(k_res, dict):
+            data_block = k_res.get("data")
+            if isinstance(data_block, dict):
+                stock_data = data_block.get(secid)
+                if isinstance(stock_data, dict):
+                    kline_list = stock_data.get("qfqday") or stock_data.get("day") or []
+                    for item in kline_list:
+                        records.append({
+                            "日期": datetime.strptime(str(item[0])[:10], "%Y-%m-%d"),
+                            "收盘": float(item[2]),
+                            "最高": float(item[3]),
+                            "最低": float(item[4])
+                        })
+    except Exception:
+        pass
+
+    # 通道 2：新浪接口备选（强制 YYYY-MM-DD 解析，绝无未来年份）
+    if not records:
+        try:
+            s_url = f"https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol={secid}&scale=240&ma=no&datalen={req_num}"
+            r_s = requests.get(s_url, headers={"Referer": "https://finance.sina.com.cn"}, timeout=6)
+            s_data = r_s.json()
+            if isinstance(s_data, list):
+                for item in s_data:
+                    d_str = str(item.get("day", ""))[:10]
+                    records.append({
+                        "日期": datetime.strptime(d_str, "%Y-%m-%d"),
+                        "收盘": float(item["close"]),
+                        "最高": float(item["high"]),
+                        "最低": float(item["low"])
+                    })
+        except Exception:
+            pass
+
+    if not records:
+        raise ValueError(f"未能获取到 {stock_name} 的历史行情数据，请稍后刷新重试")
+
     df = pd.DataFrame(records).set_index("日期").sort_index()
+    # 清理重复交易日
+    df = df[~df.index.duplicated(keep='first')]
 
     # 构造历史连续 PB 通道
     bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     df['pb'] = (df['收盘'] / bps).round(2)
 
-    # ================= 修复核心：全局周期真实分位数 (消灭虚高 80%) =================
-    # 在 4 年真实估值大池中计算每日真实位置，横盘股绝不再虚高
+    # 全局真实分位数 (彻底消灭虚高 80%)
     df['long_risk'] = (df['pb'].rank(pct=True) * 100.0).round(1)
     
-    # 短周期价格通道 (近 250 日动能)
+    # 短周期 1 年价格通道动能
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
@@ -144,7 +174,7 @@ with st.sidebar:
 
 # --- 主逻辑计算 ---
 if user_input:
-    with st.spinner(f"正在拉取「{user_input}」权威真实行情与估值中枢..."):
+    with st.spinner(f"正在全网拉取「{user_input}」长短周期数据..."):
         info = search_stock(user_input)
 
     if not info:
@@ -162,20 +192,20 @@ if user_input:
             
             st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`)")
 
-            # 最新指标取自序列末尾
+            # 最新分项指标
             long_risk = df['long_risk'].iloc[-1]
             short_risk = df['short_risk'].iloc[-1]
             risk_score = df['risk_score'].iloc[-1]
             is_pb_bottom = long_risk <= 25.0
 
-            # 真实 ROE 测算
+            # 真实 ROE 测算 (支持负数亏损)
             real_roe = (curr_pb / pe_ttm) * 100.0 if pe_ttm != 0 else 0.0
             
             if real_roe <= 0:
                 roe_status = "📉 深幅亏损 / 行业至暗失血期"
                 is_roe_declining = True
                 is_roe_rebounding = False
-                roe_desc = f"公司处于净亏损状态（ROE为 {real_roe:.2f}%），行业正在经历惨烈的产能出清‘毒打’。"
+                roe_desc = f"公司处于净亏损状态（ROE为 {real_roe:.2f}%），行业正在经历产能出清‘毒打’。"
             elif real_roe < 6.0:
                 roe_status = "📉 处于下行末端 / 低谷冰点期"
                 is_roe_declining = True

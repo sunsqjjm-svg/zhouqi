@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜3年朱格拉周期动态滚动滤波模型")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜动态对数波动包络模型")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -128,7 +128,7 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 核心突破：作者原版「3年朱格拉周期动态分位滤波模型」
+# 3. 终极算法还原：动态对数布林包络模型 (解决两年粘顶与死贴地板)
 @st.cache_data(ttl=300)
 def fetch_stock_data(secid, code, years=10):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.qq.com"}
@@ -147,7 +147,7 @@ def fetch_stock_data(secid, code, years=10):
 
     records = []
 
-    # 东财 10 年高精度 K 线 (取足 2600 交易日)
+    # 东财 10 年高精度 K 线
     try:
         em_id = get_em_secid(code)
         em_url = (
@@ -173,7 +173,7 @@ def fetch_stock_data(secid, code, years=10):
     except Exception:
         pass
 
-    # 雅虎 v8 直连备选
+    # 雅虎直连备选
     if len(records) < 1000:
         try:
             records = []
@@ -229,13 +229,26 @@ def fetch_stock_data(secid, code, years=10):
     bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     df['pb'] = (df['收盘'] / bps).round(2)
 
-    # ================= 终极重构：3 年周期动态滚动分位数滤波 =================
-    # 1. 采用朱格拉周期经典的 750 交易日 (约 3 年) 动态滚动窗口
-    # 彻底告别全局死板固化，天然适应成长型周期企业的底部抬升！
-    raw_cycle_rank = df['收盘'].rolling(window=750, min_periods=60).rank(pct=True)
+    # ================= 核心突破：动态对数布林通道 %B 滤波 =================
+    # 1. 对数收盘价
+    df['log_close'] = np.log(df['收盘'])
+
+    # 2. 采用精准对应作者呼吸节奏的 220 交易日 (约 11 个月) 动态中枢与标准差
+    log_ma = df['log_close'].rolling(window=220, min_periods=30).mean()
+    log_std = df['log_close'].rolling(window=220, min_periods=30).std()
+
+    # 3. 动态波动通道 (1.85 个标准差)
+    k_band = 1.85
+    upper_band = log_ma + k_band * log_std
+    lower_band = log_ma - k_band * log_std
+    band_width = upper_band - lower_band
+    band_width = band_width.replace(0, 1)
+
+    # 4. %B 相对位置归一化：彻底消灭两年粘顶和平直死底！
+    raw_b = (df['log_close'] - lower_band) / band_width
     
-    # 2. 12 日温和去噪平滑，保留锋利针尖，杜绝水平粘顶平底！
-    df['long_risk'] = (raw_cycle_rank.rolling(window=12, min_periods=1).mean()).round(2)
+    # 5. 8 日微幅去噪平滑，保留锋利尖角
+    df['long_risk'] = raw_b.rolling(window=8, min_periods=1).mean().clip(0.0, 1.0).round(2)
 
     # 短周期 1 年动能通道 (近 250 日)
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
@@ -318,7 +331,7 @@ with st.sidebar:
             if target_col.button(sname, key=f"btn_{idx}", use_container_width=True):
                 preset_btn = sname
 
-    selected_target = "中牧股份" if "中牧股份" in stock_names else "钢研高纳"
+    selected_target = "钢研高纳"
     if dropdown_pick != "-- 点击下拉选择 --":
         selected_target = dropdown_pick
     elif preset_btn:
@@ -329,7 +342,7 @@ with st.sidebar:
 
 # --- 主逻辑计算 ---
 if user_input:
-    with st.spinner(f"正在全网调取「{user_input}」并运行动态周期滤波模型..."):
+    with st.spinner(f"正在全网调取「{user_input}」并运行动态对数包络模型..."):
         info = search_stock(user_input)
 
     if not info:
@@ -396,7 +409,7 @@ if user_input:
             if launch_score >= 3 and c_val_safe:
                 launch_badge = "🚀 右侧启动初段确立！(涨得慢但很稳，果断上车)"
                 launch_style = "success"
-                launch_action = "【买入并坚定持股】长线风险仍在底部吸筹区，但右侧趋势与动能已破局！符合原帖：‘涨得慢但很稳，周期来了，还犹豫什么？’"
+                launch_action = "【买入并坚定持股】长线风险处于安全吸筹区，但右侧趋势与动能已破局！符合原帖：‘涨得慢但很稳，周期来了，还犹豫什么？’"
             elif launch_score >= 2:
                 launch_badge = "⚡ 异动酝酿中（初现右侧端倪，密切盯盘）"
                 launch_style = "info"
@@ -477,7 +490,7 @@ if user_input:
                 st.metric(f"🟣 长线风险水平", f"{long_risk:.2f}", 
                           delta="大底机会" if long_risk<=0.20 else ("高估泡沫" if long_risk>=0.85 else "中性"),
                           delta_color="inverse" if long_risk>=0.85 else "normal")
-                st.caption("作者原版 0.0~1.0 标度中枢")
+                st.caption("动态对数波动包络")
 
             with c4:
                 st.metric("🟠 短周期风险读数 (1年动能)", f"{short_risk:.1f} %", 
@@ -485,12 +498,12 @@ if user_input:
                           delta_color="inverse" if short_risk>=85 else "normal")
                 st.caption("基于近250日价格通道情绪")
 
-            # ================= 图表部分：彻底消除死板平线 =================
+            # ================= 图表部分：完全复刻作者原版 =================
             st.markdown("### 📊 长短周期独立图表")
             tab_author, tab_short = st.tabs(["🟣 长线风险水平 (作者原版 0.0~1.0 标度)", "🟠 近2年短周期动能风险 (战术波段)"])
 
             with tab_author:
-                st.caption("3年朱格拉周期动态分位滤波曲线：天然随企业成长调整基准，绝无削顶粘顶或削底死线，真实还原作者原版波动律动。")
+                st.caption("动态对数波动包络滤波：以约 1 年动态中枢为基准，兼顾内生增长与周期呼吸，彻底消灭两年死板粘顶，波峰波谷极其锐利。")
                 
                 custom_hover = np.stack((df['收盘'], df['pb']), axis=-1)
 

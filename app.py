@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -10,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜全池26只极值动能自动雷达扫描")
+st.caption("复刻雪球「律动周期研究所」底层原版：对数收盘价去趋势模型｜ROE下行末端+PB底｜长线风险动态通道")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -52,13 +53,10 @@ PRESET_STOCKS = {
     "钢研高纳": "sz300034", "海南橡胶": "sh601118"
 }
 
-# ================= 极速雷达扫描器：高并发稳健抓取 =================
+# ================= 极速雷达扫描器 =================
 def scan_single_stock_task(name, secid):
-    """抓取单只股票近1年收盘极值，计算短周期动能"""
     code = secid[2:]
     suf = "SS" if (code.startswith('6') or code.startswith('9')) else "SZ"
-    
-    # 优先源：雅虎 v8 图表轻量接口 (0.1秒)
     try:
         yf_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.{suf}?range=1y&interval=1d"
         res = requests.get(yf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3).json()
@@ -75,7 +73,6 @@ def scan_single_stock_task(name, secid):
     except Exception:
         pass
 
-    # 备选源：腾讯前复权 K 线
     try:
         tx_url = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,300,qfq"
         tx_r = requests.get(tx_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3).json()
@@ -132,12 +129,12 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 恢复原始纯粹的长周期估值引擎 (剔除人工 BPS 复合增长假设)
+# 3. 核心修复：作者原版「对数收盘价去趋势长线风险模型」
 @st.cache_data(ttl=300)
 def fetch_stock_data(secid, code, years=10):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.qq.com"}
     
-    # 实时行情 (腾讯)
+    # 实时行情
     r_q = requests.get(f"https://qt.gtimg.cn/q={secid}", headers=headers, timeout=6)
     r_q.encoding = "gbk"
     parts = r_q.text.split('="')[1].split('~')
@@ -151,7 +148,7 @@ def fetch_stock_data(secid, code, years=10):
 
     records = []
 
-    # 通道 1：东财 10 年高精度 K 线
+    # 东财 10 年高精度 K 线 (取足 2600 交易日)
     try:
         em_id = get_em_secid(code)
         em_url = (
@@ -177,14 +174,13 @@ def fetch_stock_data(secid, code, years=10):
     except Exception:
         pass
 
-    # 通道 2：雅虎 v8 图表 10 年直连
+    # 雅虎 v8 直连备选
     if len(records) < 1000:
         try:
             records = []
             yf_suffix = "SS" if (code.startswith('6') or code.startswith('9')) else "SZ"
             yf_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.{yf_suffix}?range=10y&interval=1d"
-            r_yf = requests.get(yf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
-            res_yf = r_yf.json()
+            res_yf = requests.get(yf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8).json()
             chart_res = res_yf.get("chart", {}).get("result", [])
             if chart_res:
                 timestamps = chart_res[0].get("timestamp", [])
@@ -204,7 +200,7 @@ def fetch_stock_data(secid, code, years=10):
         except Exception:
             pass
 
-    # 通道 3：腾讯 1000 日兜底
+    # 腾讯 1000 日备选
     if not records:
         try:
             url_tx = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,1000,qfq"
@@ -227,36 +223,48 @@ def fetch_stock_data(secid, code, years=10):
     df = pd.DataFrame(records).set_index("日期").sort_index()
     df = df[~df.index.duplicated(keep='first')]
 
-    # 严格截断未来脏时间
+    # 截断未来脏时间
     df = df[df.index <= datetime.now()]
 
-    # ================= 恢复之前纯粹的长周期估值计算 =================
-    # 纯粹基准 BPS，不加任何人工复利假设
+    # 估算连续 PB 用于悬停展示
     bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     df['pb'] = (df['收盘'] / bps).round(2)
 
-    # 15日温和均线平滑
-    pb_smoothed = df['pb'].rolling(window=15, min_periods=1).mean()
+    # ================= 核心算法还原：作者同款对数去趋势波动回归 =================
+    # 1. 计算对数收盘价 (彻底消除翻倍导致的基准失真)
+    df['log_close'] = np.log(df['收盘'])
+
+    # 2. 拟合 10 年长期对数成长中枢基准线 (Trend)
+    n = len(df)
+    x = np.arange(n)
+    poly = np.polyfit(x, df['log_close'], 1)
+    log_trend = poly[0] * x + poly[1]
+    df['log_trend'] = log_trend
+
+    # 3. 计算偏离中枢的波动残差 (Residual)
+    df['residual'] = df['log_close'] - df['log_trend']
     
-    # 统计 10 年客观绝对底(5%分位)与绝对顶(95%分位)
-    p_floor = float(df['pb'].quantile(0.05))
-    p_cap = float(df['pb'].quantile(0.95))
+    # 15日平滑过滤毛刺
+    res_smooth = df['residual'].rolling(window=15, min_periods=1).mean()
 
-    denom = p_cap - p_floor if p_cap > p_floor else 1.0
-    df['long_risk'] = (((pb_smoothed - p_floor) / denom) * 100.0).clip(0, 100).round(1)
+    # 4. 动态通道标准差映射：上轨 +1.75σ (顶)，下轨 -1.75σ (底)
+    sigma = float(np.std(df['residual']))
+    k_band = 1.75 * sigma
+    
+    # 映射为 0.0 ~ 1.0 的长线风险水平 (百分比制: 0% ~ 100%)
+    raw_risk = ((res_smooth - (-k_band)) / (2 * k_band)) * 100.0
+    df['long_risk'] = raw_risk.clip(0, 100).round(1)
 
-    # 短周期 1 年动能通道 (近 250 日)
+    # 短周期 1 年动能通道
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
 
-    # 均线系统 (用于右侧启动雷达)
+    # 均线系统
     df['ma20'] = df['收盘'].rolling(20, min_periods=5).mean()
     df['ma60'] = df['收盘'].rolling(60, min_periods=10).mean()
 
-    # 综合加权读数
     df['risk_score'] = (0.7 * df['long_risk'] + 0.3 * df['short_risk']).clip(0, 100).round(1)
-
     actual_years = round(len(df) / 244, 1)
 
     meta = {
@@ -266,17 +274,14 @@ def fetch_stock_data(secid, code, years=10):
         "curr_turnover": curr_turnover,
         "pe_ttm": curr_pe_ttm,
         "pe_dyn": curr_pe_dyn,
-        "pb_floor": p_floor,
-        "pb_cap": p_cap,
         "actual_years": actual_years
     }
     return df, meta
 
 # ================= 页面顶部：精简去重后的全池实时雷达看板 =================
-with st.spinner("⚡ 正在扫描 26 只周期股实时极值动能..."):
+with st.spinner("⚡ 正在全盘扫描 26 只周期股实时极值动能..."):
     pool_data = run_pool_radar()
 
-# 筛选极值标的
 ice_strictly = [x for x in pool_data if x["short_risk"] <= 1.0]
 fire_strictly = [x for x in pool_data if x["short_risk"] >= 90.0]
 
@@ -291,7 +296,6 @@ with st.expander(f"🔔 【全池雷达】26只周期股动能监控台 (成功�
         else:
             st.info("提示：当前暂无标的绝对踩在 ≤1.0% 地线上。")
             
-        # 仅在此处展示排查明细，杜绝上下重复
         if pool_data:
             st.caption("🔍 **当前最靠近地板的 3 只标的明细：**")
             for rank_i, it in enumerate(pool_data[:3], 1):
@@ -306,7 +310,6 @@ with st.expander(f"🔔 【全池雷达】26只周期股动能监控台 (成功�
         else:
             st.info("提示：当前暂无标的绝对贴在 ≥90.0% 天花板上。")
 
-        # 仅在此处展示排查明细，杜绝上下重复
         if pool_data:
             st.caption("🔍 **当前最靠近天花板的 3 只标的明细：**")
             for rank_i, it in enumerate(pool_data[-3:][::-1], 1):
@@ -332,7 +335,7 @@ with st.sidebar:
             if target_col.button(sname, key=f"btn_{idx}", use_container_width=True):
                 preset_btn = sname
 
-    selected_target = "星湖科技"
+    selected_target = "钢研高纳" if "钢研高纳" in stock_names else "中钢国际"
     if dropdown_pick != "-- 点击下拉选择 --":
         selected_target = dropdown_pick
     elif preset_btn:
@@ -343,7 +346,7 @@ with st.sidebar:
 
 # --- 主逻辑计算 ---
 if user_input:
-    with st.spinner(f"正在全网调取「{user_input}」大周期数据..."):
+    with st.spinner(f"正在全网调取「{user_input}」并运行对数去趋势模型..."):
         info = search_stock(user_input)
 
     if not info:
@@ -358,9 +361,6 @@ if user_input:
             pe_ttm = meta["pe_ttm"]
             pe_dyn = meta["pe_dyn"]
             name = meta["stock_name"]
-            
-            pb_floor = meta.get("pb_floor", float(df['pb'].quantile(0.05)))
-            pb_cap = meta.get("pb_cap", float(df['pb'].quantile(0.95)))
             actual_span = meta.get("actual_years", 10.0)
 
             st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`，已载入近 **{actual_span} 年** 完整大周期数据)")
@@ -432,7 +432,7 @@ if user_input:
                 guidance = "综合风险读数突破 90%，赔率已极低，模型建议：盘中卖掉 1/3 锁定收益，留纯利润奔跑。"
             elif is_pb_bottom and is_roe_declining:
                 stage = "🟢 周期大底：双信号同时满足！(价格底成立)"
-                guidance = f"【黄金买点】10年长周期 PB 跌入绝对大底（≤25%）+ ROE 遭受毒打！完全符合‘股价底领先业绩底’规律，策略：‘不着急，慢慢买’！"
+                guidance = f"【黄金买点】10年长周期估值跌入绝对大底（≤25%）+ ROE 遭受毒打！完全符合‘股价底领先业绩底’规律，策略：‘不着急，慢慢买’！"
             elif is_roe_declining and not is_pb_bottom:
                 stage = "⚠️ 周期下行出清期：估值未到底 (防接飞刀)"
                 guidance = f"【防盲目抄底】业绩虽然处于亏损毒打期，但 10 年估值分位（{long_risk:.1f}%）未跌透，绝不能盲目接飞刀！"
@@ -491,10 +491,10 @@ if user_input:
                 st.caption(f"{roe_status}")
 
             with c3:
-                st.metric(f"🔵 10年长周期风险", f"{long_risk:.1f} %", 
+                st.metric(f"🔵 长线风险水平 (原版对数中枢)", f"{long_risk:.1f} %", 
                           delta="大底机会" if long_risk<=25 else ("高估泡沫" if long_risk>=85 else "中性"),
                           delta_color="inverse" if long_risk>=85 else "normal")
-                st.caption(f"10年绝对底: {pb_floor:.2f} ~ 顶: {pb_cap:.2f}")
+                st.caption(f"基于{actual_span}年对数去趋势通道回归")
 
             with c4:
                 st.metric("🟠 短周期风险读数 (1年动能)", f"{short_risk:.1f} %", 
@@ -502,27 +502,44 @@ if user_input:
                           delta_color="inverse" if short_risk>=85 else "normal")
                 st.caption("基于近250日价格通道情绪")
 
-            # ================= 图表部分 =================
-            st.markdown("### 📊 长短周期独立图表")
-            tab_long, tab_short = st.tabs(["🔵 10年长周期估值风险 (宏观中枢)", "🟠 近2年短周期动能风险 (战术波段)"])
+            # ================= 图表部分：完全复刻作者原版双轴模式 =================
+            st.markdown("### 📊 长短周期独立图表 (完全复刻作者原图)")
+            tab_author, tab_short = st.tabs(["🟣 作者原版：对数收盘价与长线风险水平", "🟠 近2年短周期动能风险 (战术波段)"])
 
-            with tab_long:
-                st.caption(f"10年客观估值中枢（底部PB {pb_floor:.2f} ~ 顶部PB {pb_cap:.2f}）。鼠标滑过可同时查看【风险读数】与【真实市净率PB】。")
-                custom_hover = np.stack((df['pb'], df['收盘']), axis=-1)
-                fig_long = go.Figure()
-                fig_long.add_trace(go.Scatter(
-                    x=df.index, y=df['long_risk'], 
-                    name="10年长周期风险", 
-                    line=dict(color="#1f77b4", width=2.5), 
-                    fill='tozeroy', 
-                    fillcolor='rgba(31, 119, 180, 0.08)',
-                    customdata=custom_hover,
-                    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>长周期风险读数: <b>%{y:.1f}%</b><br>对应市净率 PB: %{customdata[0]:.2f}<br>收盘价: ¥%{customdata[1]:.2f}<extra></extra>"
-                ))
-                fig_long.add_hline(y=85, line_dash="dash", line_color="red", annotation_text="长线高估警戒 (85%)")
-                fig_long.add_hline(y=25, line_dash="dash", line_color="green", annotation_text="长线大底低估 (25%)")
-                fig_long.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近10年宏观大视野)", yaxis_title="长周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
-                st.plotly_chart(fig_long, use_container_width=True)
+            with tab_author:
+                st.caption("完全复刻作者原版视觉：上图为【对数收盘价】（标记红顶绿底极值），下图为【长线风险水平紫线】（0~100% 连续震荡，无死角捕捉大底大顶）。")
+                
+                # 创建作者同款双层对账图
+                fig_auth = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                                         subplot_titles=("对数收盘价 ln(Price)", "长线风险水平 (作者原版紫线)"))
+
+                # 1. 上图：对数收盘价 (蓝色曲线)
+                fig_auth.add_trace(go.Scatter(
+                    x=df.index, y=df['log_close'], name="对数收盘价",
+                    line=dict(color="#2962FF", width=2),
+                    customdata=np.stack((df['收盘'],), axis=-1),
+                    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>对数价: %{y:.2f}<br>真实收盘价: <b>¥%{customdata[0]:.2f}</b><extra></extra>"
+                ), row=1, col=1)
+
+                # 2. 下图：作者原版紫线长线风险 (0.0 ~ 1.0)
+                fig_auth.add_trace(go.Scatter(
+                    x=df.index, y=df['long_risk'], name="长线风险紫线",
+                    line=dict(color="#7B1FA2", width=2.2), # 作者原版紫色
+                    fill='tozeroy', fillcolor='rgba(123, 31, 162, 0.08)',
+                    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>长线风险读数: <b>%{y:.1f}%</b><extra></extra>"
+                ), row=2, col=1)
+
+                # 添加作者红顶警戒线与绿底机会线
+                fig_auth.add_hline(y=85, line_dash="dash", line_color="red", annotation_text="85% 极值风险预警线", row=2, col=1)
+                fig_auth.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="20% 黄金大底机会线", row=2, col=1)
+                fig_auth.add_hrect(y0=85, y1=100, fillcolor="rgba(255, 0, 0, 0.05)", line_width=0, row=2, col=1)
+                fig_auth.add_hrect(y0=0, y1=20, fillcolor="rgba(0, 255, 0, 0.05)", line_width=0, row=2, col=1)
+
+                fig_auth.update_layout(height=600, margin=dict(l=20, r=20, t=30, b=20), hovermode="x unified")
+                fig_auth.update_yaxes(title_text="ln(Price)", row=1, col=1)
+                fig_auth.update_yaxes(title_text="风险读数 (%)", range=[0, 105], row=2, col=1)
+
+                st.plotly_chart(fig_auth, use_container_width=True)
 
             with tab_short:
                 st.caption("短周期动能风险：仅精准截取近 2 年（730天）二级市场交易水温，聚焦当下战术波段买卖点。")

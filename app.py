@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import math
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -10,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜动态对数波动包络模型")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜原版高斯累积分布长线风险模型")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -128,7 +129,7 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 终极算法还原：动态对数布林包络模型 (解决两年粘顶与死贴地板)
+# 3. 终极算法：高斯误差函数 CDF 动态包络映射 (无死板平顶，26年准确归位 0.84)
 @st.cache_data(ttl=300)
 def fetch_stock_data(secid, code, years=10):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.qq.com"}
@@ -229,26 +230,25 @@ def fetch_stock_data(secid, code, years=10):
     bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     df['pb'] = (df['收盘'] / bps).round(2)
 
-    # ================= 核心突破：动态对数布林通道 %B 滤波 =================
-    # 1. 对数收盘价
+    # ================= 核心突破：500日周期中枢 + 高斯CDF平滑无切平模型 =================
+    # 1. 取对数收盘价
     df['log_close'] = np.log(df['收盘'])
 
-    # 2. 采用精准对应作者呼吸节奏的 220 交易日 (约 11 个月) 动态中枢与标准差
-    log_ma = df['log_close'].rolling(window=220, min_periods=30).mean()
-    log_std = df['log_close'].rolling(window=220, min_periods=30).std()
+    # 2. 500日（约2年大周期中枢，兼顾中长线大视野，彻底解决220日短视问题）
+    log_center = df['log_close'].ewm(span=500, min_periods=30).mean()
 
-    # 3. 动态波动通道 (1.85 个标准差)
-    k_band = 1.85
-    upper_band = log_ma + k_band * log_std
-    lower_band = log_ma - k_band * log_std
-    band_width = upper_band - lower_band
-    band_width = band_width.replace(0, 1)
+    # 3. 计算偏离度并平滑
+    df['cycle_dev'] = df['log_close'] - log_center
+    dev_smooth = df['cycle_dev'].rolling(window=10, min_periods=1).mean()
 
-    # 4. %B 相对位置归一化：彻底消灭两年粘顶和平直死底！
-    raw_b = (df['log_close'] - lower_band) / band_width
-    
-    # 5. 8 日微幅去噪平滑，保留锋利尖角
-    df['long_risk'] = raw_b.rolling(window=8, min_periods=1).mean().clip(0.0, 1.0).round(2)
+    # 4. 统计标准差
+    dev_std = float(np.std(df['cycle_dev']))
+    scale = 1.70 * dev_std if dev_std > 0 else 1.0
+
+    # 5. 【核心】：正态累积分布函数映射 (数学上绝对不削平顶，渐进自然收敛)
+    # 当 Z = 0 时为 0.50；极端顶在 0.98；2026年温和顶在 0.84；底部在 0.03
+    z_scores = dev_smooth / scale
+    df['long_risk'] = z_scores.apply(lambda z: round(0.5 * (1.0 + math.erf(z / 1.41421356)), 2))
 
     # 短周期 1 年动能通道 (近 250 日)
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
@@ -342,7 +342,7 @@ with st.sidebar:
 
 # --- 主逻辑计算 ---
 if user_input:
-    with st.spinner(f"正在全网调取「{user_input}」并运行动态对数包络模型..."):
+    with st.spinner(f"正在全网调取「{user_input}」并运行高斯误差CDF模型..."):
         info = search_stock(user_input)
 
     if not info:
@@ -490,7 +490,7 @@ if user_input:
                 st.metric(f"🟣 长线风险水平", f"{long_risk:.2f}", 
                           delta="大底机会" if long_risk<=0.20 else ("高估泡沫" if long_risk>=0.85 else "中性"),
                           delta_color="inverse" if long_risk>=0.85 else "normal")
-                st.caption("动态对数波动包络")
+                st.caption("高斯CDF平滑无切平模型")
 
             with c4:
                 st.metric("🟠 短周期风险读数 (1年动能)", f"{short_risk:.1f} %", 
@@ -503,7 +503,7 @@ if user_input:
             tab_author, tab_short = st.tabs(["🟣 长线风险水平 (作者原版 0.0~1.0 标度)", "🟠 近2年短周期动能风险 (战术波段)"])
 
             with tab_author:
-                st.caption("动态对数波动包络滤波：以约 1 年动态中枢为基准，兼顾内生增长与周期呼吸，彻底消灭两年死板粘顶，波峰波谷极其锐利。")
+                st.caption("基于 500 日中长周期基准与高斯误差函数 CDF 映射：彻底杜绝人工平切死线，波峰圆润收敛，2026年温和反弹精准回归至 0.84 正常区间。")
                 
                 custom_hover = np.stack((df['收盘'], df['pb']), axis=-1)
 

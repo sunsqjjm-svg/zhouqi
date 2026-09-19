@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜动态朱格拉周期偏离模型")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜原版 0.0~1.0 长线风险水平")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -128,7 +128,7 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 核心完善：作者同款「动态周期律动偏离模型」
+# 3. 核心完善：作者同款「动态周期律动偏离模型 (0.0~1.0 标度)」
 @st.cache_data(ttl=300)
 def fetch_stock_data(secid, code, years=10):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.qq.com"}
@@ -234,10 +234,9 @@ def fetch_stock_data(secid, code, years=10):
     df['log_close'] = np.log(df['收盘'])
 
     # 2. 动态周期基准中枢 (以 2.5~3 年产业投资周期约为 650 交易日的加权均线为锚)
-    # 彻底解决 10 年固定死板直线导致的“暴涨后三年粘顶”问题
     df['log_cycle_center'] = df['log_close'].ewm(span=650, min_periods=30).mean()
 
-    # 3. 计算对数偏离残差 (价格与动态周期的偏离度)
+    # 3. 计算对数偏离残差
     df['cycle_dev'] = df['log_close'] - df['log_cycle_center']
     
     # 15日温和去噪平滑
@@ -248,10 +247,10 @@ def fetch_stock_data(secid, code, years=10):
     d_cap = float(df['cycle_dev'].quantile(0.95))
     denom = d_cap - d_floor if d_cap > d_floor else 1.0
 
-    # 5. 映射为作者原版 0.0 ~ 1.0 连续长线风险读数 (0% ~ 100%)
-    df['long_risk'] = (((dev_smooth - d_floor) / denom) * 100.0).clip(0, 100).round(1)
+    # 5. 【彻底与作者一致】：直接映射为 0.00 ~ 1.00 的无量纲标度
+    df['long_risk'] = (((dev_smooth - d_floor) / denom)).clip(0.0, 1.0).round(2)
 
-    # 短周期 1 年动能通道 (近 250 日)
+    # 短周期 1 年动能通道 (近 250 日，保持百分比制便于短线监控)
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
@@ -260,7 +259,8 @@ def fetch_stock_data(secid, code, years=10):
     df['ma20'] = df['收盘'].rolling(20, min_periods=5).mean()
     df['ma60'] = df['收盘'].rolling(60, min_periods=10).mean()
 
-    df['risk_score'] = (0.7 * df['long_risk'] + 0.3 * df['short_risk']).clip(0, 100).round(1)
+    # 综合读数
+    df['risk_score'] = (0.7 * (df['long_risk'] * 100.0) + 0.3 * df['short_risk']).clip(0, 100).round(1)
     actual_years = round(len(df) / 244, 1)
 
     meta = {
@@ -365,7 +365,7 @@ if user_input:
             long_risk = df['long_risk'].iloc[-1]
             short_risk = df['short_risk'].iloc[-1]
             risk_score = df['risk_score'].iloc[-1]
-            is_pb_bottom = long_risk <= 25.0
+            is_pb_bottom = long_risk <= 0.25
 
             # 真实 ROE 测算
             real_roe = (curr_pb / pe_ttm) * 100.0 if pe_ttm != 0 else 0.0
@@ -401,7 +401,7 @@ if user_input:
             low_120d = df['最低'].tail(120).min()
             c_wbottom = low_25d > (low_120d * 1.04)
             c_momentum = short_risk >= 48.0
-            c_val_safe = long_risk <= 45.0
+            c_val_safe = long_risk <= 0.45
 
             launch_checks = [c_trend, c_wbottom, c_momentum, c_val_safe]
             launch_score = sum(launch_checks)
@@ -419,25 +419,25 @@ if user_input:
                 launch_style = "warning"
                 launch_action = "【切忌重仓盲目冲入】虽然长线估值便宜，但短线均线仍受压制、缺乏向上动能。策略：继续‘不着急，慢慢买’分批潜伏。"
 
-            # 周期位置核心裁决
-            if long_risk >= 85 and short_risk >= 85:
+            # 周期位置核心裁决 (0.0~1.0 标度完全对齐)
+            if long_risk >= 0.85 and short_risk >= 85:
                 stage = "🔴 周期大顶：长短周期同时触顶 (双共振清仓)"
-                guidance = "10年长周期估值泡沫化 + 短周期情绪极限超买！触发作者最高级别大顶预警，坚决分批离场防 40%+ 级暴跌！"
+                guidance = "长线风险达 0.85+ 极值泡沫 + 短周期情绪极限超买！触发最高级别大顶预警，坚决分批离场防 40%+ 级暴跌！"
             elif risk_score >= 90:
                 stage = "🟠 周期极值高位区 (估值过热)"
                 guidance = "综合风险读数突破 90%，赔率已极低，模型建议：盘中卖掉 1/3 锁定收益，留纯利润奔跑。"
             elif is_pb_bottom and is_roe_declining:
                 stage = "🟢 周期大底：双信号同时满足！(价格底成立)"
-                guidance = f"【黄金买点】长线风险跌入绝对大底（≤25%）+ ROE 遭受毒打！完全符合‘股价底领先业绩底’规律，策略：‘不着急，慢慢买’！"
+                guidance = f"【黄金买点】长线风险跌入绝对大底（≤0.20）+ ROE 遭受毒打！完全符合‘股价底领先业绩底’规律，策略：‘不着急，慢慢买’！"
             elif is_roe_declining and not is_pb_bottom:
                 stage = "⚠️ 周期下行出清期：估值未到底 (防接飞刀)"
-                guidance = f"【防盲目抄底】业绩虽然处于亏损毒打期，但长周期估值分位（{long_risk:.1f}%）未跌透，绝不能盲目接飞刀！"
-            elif is_roe_rebounding and (20 < long_risk <= 60):
+                guidance = f"【防盲目抄底】业绩虽然处于亏损毒打期，但长线风险水平（{long_risk:.2f}）未跌透，绝不能盲目接飞刀！"
+            elif is_roe_rebounding and (0.20 < long_risk <= 0.60):
                 stage = "🟡 周期启动中段：已到半山腰"
                 guidance = "【坚定持股】正如作者所言：‘等你看到业绩转好、ROE上行时，股价往往已经到半山腰了’。走势‘涨得慢但很稳’。"
-            elif long_risk > 50 and is_roe_rebounding:
+            elif long_risk > 0.50 and is_roe_rebounding:
                 stage = "🔵 景气上升扩张期 (让利润奔跑)"
-                guidance = "盈利与估值双击向上，安心持股，密切监控长短周期向 90% 警戒线的推移。"
+                guidance = "盈利与估值双击向上，安心持股，密切监控长短周期向 0.85 警戒线的推移。"
             else:
                 stage = "⚖️ 周期中轴过渡期 (耐心观望)"
                 guidance = "处于多空平衡期，静待更极端的长短周期信号出现。"
@@ -471,9 +471,9 @@ if user_input:
                 st.caption("短周期读数突破 48% 压制")
 
             with r4:
-                st.metric("4. 估值安全垫充足", f"{long_risk:.1f} %", 
+                st.metric("4. 估值安全垫充足", f"{long_risk:.2f}", 
                           delta="安全吸筹区" if c_val_safe else "偏高", delta_color="normal" if c_val_safe else "inverse")
-                st.caption("长周期风险仍处于 ≤45% 底位")
+                st.caption("长线风险水平处于 ≤0.45 空间")
 
             # 4 个独立指标卡
             st.markdown("#### ⚡ 周期独立读数与核心信号")
@@ -487,10 +487,11 @@ if user_input:
                 st.caption(f"{roe_status}")
 
             with c3:
-                st.metric(f"🟣 长线风险水平 (作者原版紫线)", f"{long_risk:.1f} %", 
-                          delta="大底机会" if long_risk<=25 else ("高估泡沫" if long_risk>=85 else "中性"),
-                          delta_color="inverse" if long_risk>=85 else "normal")
-                st.caption(f"动态朱格拉周期律动偏离")
+                # 【修改为 0.0~1.0 标度】
+                st.metric(f"🟣 长线风险水平", f"{long_risk:.2f}", 
+                          delta="大底机会" if long_risk<=0.20 else ("高估泡沫" if long_risk>=0.85 else "中性"),
+                          delta_color="inverse" if long_risk>=0.85 else "normal")
+                st.caption("作者原版 0.0~1.0 标度中枢")
 
             with c4:
                 st.metric("🟠 短周期风险读数 (1年动能)", f"{short_risk:.1f} %", 
@@ -498,14 +499,13 @@ if user_input:
                           delta_color="inverse" if short_risk>=85 else "normal")
                 st.caption("基于近250日价格通道情绪")
 
-            # ================= 图表部分：彻底删除对数收盘价，保留纯净紫线 =================
+            # ================= 图表部分：纵坐标 0.0 ~ 1.0 完全复刻 =================
             st.markdown("### 📊 长短周期独立图表")
-            tab_author, tab_short = st.tabs(["🟣 长线风险水平 (作者原版紫线)", "🟠 近2年短周期动能风险 (战术波段)"])
+            tab_author, tab_short = st.tabs(["🟣 长线风险水平 (作者原版 0.0~1.0 标度)", "🟠 近2年短周期动能风险 (战术波段)"])
 
             with tab_author:
-                st.caption("作者原版同款动态偏离滤波曲线：彻底解决固定直线导致的‘长年粘顶’问题，无缝捕捉历史历次大底（如 2018年、2024年 5.5元大底）。")
+                st.caption("完全复刻作者原版规范：纵坐标为纯粹的 0.0 ~ 1.0 标度，彻底解决固定直线导致的‘三年粘顶’问题。")
                 
-                # 悬停同时显示风险读数、股价与对应PB
                 custom_hover = np.stack((df['收盘'], df['pb']), axis=-1)
 
                 fig_auth = go.Figure()
@@ -514,18 +514,28 @@ if user_input:
                     line=dict(color="#7B1FA2", width=2.4), # 作者原版紫色
                     fill='tozeroy', fillcolor='rgba(123, 31, 162, 0.08)',
                     customdata=custom_hover,
-                    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>长线风险读数: <b>%{y:.1f}%</b><br>收盘价: <b>¥%{customdata[0]:.2f}</b><br>对应市净率 PB: %{customdata[1]:.2f}<extra></extra>"
+                    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>长线风险水平: <b>%{y:.2f}</b><br>收盘价: <b>¥%{customdata[0]:.2f}</b><br>对应市净率 PB: %{customdata[1]:.2f}<extra></extra>"
                 ))
 
-                # 添加作者红顶警戒线与绿底机会线
-                fig_auth.add_hline(y=85, line_dash="dash", line_color="red", annotation_text="85% 极值风险预警线")
-                fig_auth.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="20% 黄金大底机会线")
-                fig_auth.add_hrect(y0=85, y1=100, fillcolor="rgba(255, 0, 0, 0.05)", line_width=0)
-                fig_auth.add_hrect(y0=0, y1=20, fillcolor="rgba(0, 255, 0, 0.05)", line_width=0)
+                # 【0.85 与 0.20 作者原版标度参考线】
+                fig_auth.add_hline(y=0.85, line_dash="dash", line_color="red", annotation_text="0.85 极值风险预警线")
+                fig_auth.add_hline(y=0.20, line_dash="dash", line_color="green", annotation_text="0.20 黄金大底机会线")
+                fig_auth.add_hrect(y0=0.85, y1=1.0, fillcolor="rgba(255, 0, 0, 0.05)", line_width=0)
+                fig_auth.add_hrect(y0=0.0, y1=0.20, fillcolor="rgba(0, 255, 0, 0.05)", line_width=0)
 
-                fig_auth.update_layout(height=420, margin=dict(l=20, r=20, t=30, b=20),
-                                       xaxis_title="真实交易日期 (近10年动态大视野)", yaxis_title="风险读数 (%)", yaxis=dict(range=[0, 105]),
-                                       hovermode="x unified")
+                # 【纵坐标完全设置为 0.0 ~ 1.0 标准刻度】
+                fig_auth.update_layout(
+                    height=420, margin=dict(l=20, r=20, t=30, b=20),
+                    xaxis_title="真实交易日期 (近10年动态大视野)",
+                    yaxis_title="长线风险水平",
+                    yaxis=dict(
+                        range=[-0.05, 1.05],
+                        tickmode='array',
+                        tickvals=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+                        ticktext=['0.0', '0.2', '0.4', '0.6', '0.8', '1.0']
+                    ),
+                    hovermode="x unified"
+                )
 
                 st.plotly_chart(fig_auth, use_container_width=True)
 

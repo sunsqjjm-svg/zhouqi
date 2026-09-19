@@ -38,10 +38,26 @@ def get_em_secid(code):
     code = str(code).strip()
     return f"1.{code}" if (code.startswith('6') or code.startswith('9')) else f"0.{code}"
 
-# 2. 股票搜索
+# 2. 26 只自选强周期标的专属映射库
+PRESET_STOCKS = {
+    "恒邦股份": "sz002237", "星湖科技": "sh600866", "北元化工": "sh601568",
+    "岳阳林纸": "sh600963", "中盐化工": "sh600328", "中牧股份": "sh600195",
+    "六九一二": "sz301592", "岳阳兴长": "sz000819", "新希望": "sz000876",
+    "安迪苏": "sh600299", "天康生物": "sz002100", "中国中冶": "sh601618",
+    "中钢国际": "sz000928", "雪峰科技": "sh603227", "双环科技": "sz000707",
+    "中粮科工": "sz301058", "中密控股": "sz300470", "齐翔腾达": "sz002408",
+    "凯龙股份": "sz002783", "辉隆股份": "sz002556", "中农立华": "sh603970",
+    "国泰集团": "sh603977", "四川美丰": "sz000731", "振华新材": "sh688707",
+    "钢研高纳": "sz300034", "海南橡胶": "sh601118"
+}
+
 @st.cache_data(ttl=86400)
 def search_stock(keyword):
     keyword = keyword.strip()
+    if keyword in PRESET_STOCKS:
+        code = PRESET_STOCKS[keyword][2:]
+        return {"code": code, "name": keyword, "secid": PRESET_STOCKS[keyword]}
+
     if keyword.isdigit() and len(keyword) == 6:
         return {"code": keyword, "name": keyword, "secid": get_symbol_prefix(keyword)}
 
@@ -57,11 +73,7 @@ def search_stock(keyword):
     except Exception:
         pass
 
-    preset_map = {
-        "中钢国际": "sz000928", "天康生物": "sz002100", "蓝思科技": "sz300433", 
-        "京东方A": "sz000725", "TCL科技": "sz000100", "韦尔股份": "sh603501", "紫金矿业": "sh601899"
-    }
-    for k, v in preset_map.items():
+    for k, v in PRESET_STOCKS.items():
         if k in keyword:
             return {"code": v[2:], "name": k, "secid": v}
     return None
@@ -85,7 +97,7 @@ def fetch_stock_data(secid, code, years=10):
 
     records = []
 
-    # 通道 1：东财 10 年高精度 K 线
+    # 通道 1：东财 10 年高精度 K 线 (带 ut 授权)
     try:
         em_id = get_em_secid(code)
         em_url = (
@@ -99,7 +111,7 @@ def fetch_stock_data(secid, code, years=10):
         r_em = requests.get(em_url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}, timeout=8)
         k_data = r_em.json().get("data", {})
         klines = k_data.get("klines", [])
-        if len(klines) >= 1500:
+        if len(klines) >= 1000:
             for k in klines:
                 p = k.split(",")
                 records.append({
@@ -112,7 +124,7 @@ def fetch_stock_data(secid, code, years=10):
         pass
 
     # 通道 2：雅虎财经 10 年前复权直连
-    if len(records) < 1500:
+    if len(records) < 1000:
         try:
             records = []
             yf_suffix = "SS" if (code.startswith('6') or code.startswith('9')) else "SZ"
@@ -156,7 +168,7 @@ def fetch_stock_data(secid, code, years=10):
             pass
 
     if not records:
-        raise ValueError(f"未能获取到 {stock_name} 的历史行情数据，请刷新重试")
+        raise ValueError(f"未能获取到 {stock_name} 的行情数据，请刷新重试")
 
     df = pd.DataFrame(records).set_index("日期").sort_index()
     df = df[~df.index.duplicated(keep='first')]
@@ -164,19 +176,18 @@ def fetch_stock_data(secid, code, years=10):
     # 截断未来脏时间
     df = df[df.index <= datetime.now()]
 
-    # 动态 BPS 复合增长回溯模型 (还原真实历史天花板)
+    # 动态 BPS 复合增长模型
     latest_bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     latest_date = df.index[-1]
     
     delta_years = (latest_date - df.index).days / 365.25
     dynamic_bps = latest_bps / ((1.055) ** delta_years)
-    
     df['pb'] = (df['收盘'] / dynamic_bps).round(2)
 
     # 20日平滑
     pb_smoothed = df['pb'].rolling(window=20, min_periods=1).mean()
     
-    # 统计 10 年完整极值
+    # 统计周期极值
     p_floor = float(df['pb'].quantile(0.02))
     p_cap = max(float(df['pb'].quantile(0.98)), 1.90)
 
@@ -207,22 +218,31 @@ def fetch_stock_data(secid, code, years=10):
     }
     return df, meta
 
-# --- 侧边栏 ---
+# --- 侧边栏交互 ---
 with st.sidebar:
     st.header("⚙️ 标的诊断设置")
-    st.write("快捷诊断经典强周期标的：")
-    c1, c2, c3 = st.columns(3)
-    preset = None
-    if c1.button("中钢国际"): preset = "中钢国际"
-    if c2.button("天康生物"): preset = "天康生物"
-    if c3.button("蓝思科技"): preset = "蓝思科技"
+    
+    # 1. 下拉快捷选择（26只精选池）
+    stock_names = list(PRESET_STOCKS.keys())
+    dropdown_pick = st.selectbox("📌 26只经典周期股快捷直选：", ["-- 点击下拉选择 --"] + stock_names)
 
-    c4, c5, c6 = st.columns(3)
-    if c4.button("京东方A"): preset = "京东方A"
-    if c5.button("TCL科技"): preset = "TCL科技"
-    if c6.button("紫金矿业"): preset = "紫金矿业"
+    # 2. 折叠式 2 列按钮面板
+    preset_btn = None
+    with st.expander("📂 展开 26 只周期股按钮网格", expanded=False):
+        col1, col2 = st.columns(2)
+        for idx, sname in enumerate(stock_names):
+            target_col = col1 if idx % 2 == 0 else col2
+            if target_col.button(sname, key=f"btn_{idx}", use_container_width=True):
+                preset_btn = sname
 
-    user_input = st.text_input("输入股票名称或6位代码", value=preset if preset else "中钢国际")
+    # 确定当前选择项
+    selected_target = "中钢国际" # 初始默认值
+    if dropdown_pick != "-- 点击下拉选择 --":
+        selected_target = dropdown_pick
+    elif preset_btn:
+        selected_target = preset_btn
+
+    user_input = st.text_input("或直接输入股票名称/代码", value=selected_target)
     years_back = st.slider("大周期回溯跨度（年）", min_value=5, max_value=12, value=10, step=1, help="强周期行业设备与产能周期（朱格拉周期）通常历时7-10年，推荐10年完整视角。")
 
 # --- 主逻辑计算 ---
@@ -362,7 +382,7 @@ if user_input:
             with tab_short:
                 st.caption("短周期动能风险：仅精准截取近 2 年（730天）二级市场交易水温，聚焦当下战术波段买卖点。")
                 
-                # 核心改变：严格只截取最近 2 年数据
+                # 严格只截取最近 2 年数据
                 two_years_cutoff = df.index[-1] - timedelta(days=730)
                 df_short = df[df.index >= two_years_cutoff]
                 

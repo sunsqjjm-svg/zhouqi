@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜集成右侧底部启动雷达")
+st.caption("股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜集成右侧底部启动雷达")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -463,8 +463,8 @@ if user_input:
                 fig_short.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近2年高清视角)", yaxis_title="短周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
                 st.plotly_chart(fig_short, use_container_width=True)
 
-            # ================= 模块：作者同款 Tushare 极值对账 =================
-            st.markdown("### 📋 周期极值回溯对账（复现作者复盘方法）")
+            # ================= 模块： 极值对账 =================
+            st.markdown("### 📋 周期极值回溯对账")
             lowest_row = df.loc[df['收盘'].idxmin()]
             lowest_date = df['收盘'].idxmin().strftime('%Y-%m-%d')
             lowest_price = lowest_row['最低']

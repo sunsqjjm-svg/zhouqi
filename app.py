@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜原版 0.0~1.0 长线风险水平")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜3年朱格拉周期动态滚动滤波模型")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -128,7 +128,7 @@ def search_stock(keyword):
             return {"code": v[2:], "name": k, "secid": v}
     return None
 
-# 3. 核心完善：作者同款「动态周期律动偏离模型 (0.0~1.0 标度)」
+# 3. 核心突破：作者原版「3年朱格拉周期动态分位滤波模型」
 @st.cache_data(ttl=300)
 def fetch_stock_data(secid, code, years=10):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.qq.com"}
@@ -229,28 +229,15 @@ def fetch_stock_data(secid, code, years=10):
     bps = curr_price / curr_pb if curr_pb > 0 else 1.0
     df['pb'] = (df['收盘'] / bps).round(2)
 
-    # ================= 核心突破：动态朱格拉周期中枢滤波模型 =================
-    # 1. 对数收盘价
-    df['log_close'] = np.log(df['收盘'])
-
-    # 2. 动态周期基准中枢 (以 2.5~3 年产业投资周期约为 650 交易日的加权均线为锚)
-    df['log_cycle_center'] = df['log_close'].ewm(span=650, min_periods=30).mean()
-
-    # 3. 计算对数偏离残差
-    df['cycle_dev'] = df['log_close'] - df['log_cycle_center']
+    # ================= 终极重构：3 年周期动态滚动分位数滤波 =================
+    # 1. 采用朱格拉周期经典的 750 交易日 (约 3 年) 动态滚动窗口
+    # 彻底告别全局死板固化，天然适应成长型周期企业的底部抬升！
+    raw_cycle_rank = df['收盘'].rolling(window=750, min_periods=60).rank(pct=True)
     
-    # 15日温和去噪平滑
-    dev_smooth = df['cycle_dev'].rolling(window=15, min_periods=1).mean()
+    # 2. 12 日温和去噪平滑，保留锋利针尖，杜绝水平粘顶平底！
+    df['long_risk'] = (raw_cycle_rank.rolling(window=12, min_periods=1).mean()).round(2)
 
-    # 4. 统计周期极端偏离度 (5% 绝对大底分位 与 95% 绝对大顶分位)
-    d_floor = float(df['cycle_dev'].quantile(0.05))
-    d_cap = float(df['cycle_dev'].quantile(0.95))
-    denom = d_cap - d_floor if d_cap > d_floor else 1.0
-
-    # 5. 【彻底与作者一致】：直接映射为 0.00 ~ 1.00 的无量纲标度
-    df['long_risk'] = (((dev_smooth - d_floor) / denom)).clip(0.0, 1.0).round(2)
-
-    # 短周期 1 年动能通道 (近 250 日，保持百分比制便于短线监控)
+    # 短周期 1 年动能通道 (近 250 日)
     roll_high = df['收盘'].rolling(250, min_periods=30).max()
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
@@ -361,11 +348,11 @@ if user_input:
 
             st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`，已载入近 **{actual_span} 年** 完整大周期数据)")
 
-            # 最新指标
+            # 最新指标 (0.0~1.0 标度)
             long_risk = df['long_risk'].iloc[-1]
             short_risk = df['short_risk'].iloc[-1]
             risk_score = df['risk_score'].iloc[-1]
-            is_pb_bottom = long_risk <= 0.25
+            is_pb_bottom = long_risk <= 0.20
 
             # 真实 ROE 测算
             real_roe = (curr_pb / pe_ttm) * 100.0 if pe_ttm != 0 else 0.0
@@ -409,7 +396,7 @@ if user_input:
             if launch_score >= 3 and c_val_safe:
                 launch_badge = "🚀 右侧启动初段确立！(涨得慢但很稳，果断上车)"
                 launch_style = "success"
-                launch_action = "【买入并坚定持股】长周期估值仍在安全吸筹区，但右侧趋势与动能已破局！符合原帖：‘涨得慢但很稳，周期来了，还犹豫什么？’"
+                launch_action = "【买入并坚定持股】长线风险仍在底部吸筹区，但右侧趋势与动能已破局！符合原帖：‘涨得慢但很稳，周期来了，还犹豫什么？’"
             elif launch_score >= 2:
                 launch_badge = "⚡ 异动酝酿中（初现右侧端倪，密切盯盘）"
                 launch_style = "info"
@@ -487,7 +474,6 @@ if user_input:
                 st.caption(f"{roe_status}")
 
             with c3:
-                # 【修改为 0.0~1.0 标度】
                 st.metric(f"🟣 长线风险水平", f"{long_risk:.2f}", 
                           delta="大底机会" if long_risk<=0.20 else ("高估泡沫" if long_risk>=0.85 else "中性"),
                           delta_color="inverse" if long_risk>=0.85 else "normal")
@@ -499,31 +485,29 @@ if user_input:
                           delta_color="inverse" if short_risk>=85 else "normal")
                 st.caption("基于近250日价格通道情绪")
 
-            # ================= 图表部分：纵坐标 0.0 ~ 1.0 完全复刻 =================
+            # ================= 图表部分：彻底消除死板平线 =================
             st.markdown("### 📊 长短周期独立图表")
             tab_author, tab_short = st.tabs(["🟣 长线风险水平 (作者原版 0.0~1.0 标度)", "🟠 近2年短周期动能风险 (战术波段)"])
 
             with tab_author:
-                st.caption("完全复刻作者原版规范：纵坐标为纯粹的 0.0 ~ 1.0 标度，彻底解决固定直线导致的‘三年粘顶’问题。")
+                st.caption("3年朱格拉周期动态分位滤波曲线：天然随企业成长调整基准，绝无削顶粘顶或削底死线，真实还原作者原版波动律动。")
                 
                 custom_hover = np.stack((df['收盘'], df['pb']), axis=-1)
 
                 fig_auth = go.Figure()
                 fig_auth.add_trace(go.Scatter(
                     x=df.index, y=df['long_risk'], name="长线风险水平",
-                    line=dict(color="#7B1FA2", width=2.4), # 作者原版紫色
+                    line=dict(color="#7B1FA2", width=2.4),
                     fill='tozeroy', fillcolor='rgba(123, 31, 162, 0.08)',
                     customdata=custom_hover,
                     hovertemplate="<b>%{x|%Y-%m-%d}</b><br>长线风险水平: <b>%{y:.2f}</b><br>收盘价: <b>¥%{customdata[0]:.2f}</b><br>对应市净率 PB: %{customdata[1]:.2f}<extra></extra>"
                 ))
 
-                # 【0.85 与 0.20 作者原版标度参考线】
                 fig_auth.add_hline(y=0.85, line_dash="dash", line_color="red", annotation_text="0.85 极值风险预警线")
                 fig_auth.add_hline(y=0.20, line_dash="dash", line_color="green", annotation_text="0.20 黄金大底机会线")
                 fig_auth.add_hrect(y0=0.85, y1=1.0, fillcolor="rgba(255, 0, 0, 0.05)", line_width=0)
                 fig_auth.add_hrect(y0=0.0, y1=0.20, fillcolor="rgba(0, 255, 0, 0.05)", line_width=0)
 
-                # 【纵坐标完全设置为 0.0 ~ 1.0 标准刻度】
                 fig_auth.update_layout(
                     height=420, margin=dict(l=20, r=20, t=30, b=20),
                     xaxis_title="真实交易日期 (近10年动态大视野)",

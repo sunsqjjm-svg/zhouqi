@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜10年宏观估值 + 近2年战术动能")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜集成右侧底部启动雷达")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -200,6 +200,10 @@ def fetch_stock_data(secid, code, years=10):
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
 
+    # 均线系统计算 (用于右侧启动雷达)
+    df['ma20'] = df['收盘'].rolling(20, min_periods=5).mean()
+    df['ma60'] = df['收盘'].rolling(60, min_periods=10).mean()
+
     # 综合加权读数
     df['risk_score'] = (0.7 * df['long_risk'] + 0.3 * df['short_risk']).clip(0, 100).round(1)
 
@@ -269,7 +273,7 @@ if user_input:
 
             st.success(f"🎯 成功识别标的：**{name}** (代码: `{info['code']}`，已载入近 **{actual_span} 年** 完整大周期数据)")
 
-            # 最新指标
+            # 最新分项指标
             long_risk = df['long_risk'].iloc[-1]
             short_risk = df['short_risk'].iloc[-1]
             risk_score = df['risk_score'].iloc[-1]
@@ -299,7 +303,42 @@ if user_input:
                 is_roe_rebounding = False
                 roe_desc = "盈利水平处于常态化波动区间。"
 
-            # 周期位置核心裁决
+            # ================= 新增：【🚀 底部启动右侧雷达】核心判定 =================
+            curr_close = df['收盘'].iloc[-1]
+            ma20_curr = df['ma20'].iloc[-1]
+            ma60_curr = df['ma60'].iloc[-1]
+            
+            # 条件 1：生命线破局 (站上 60 日季度线，且 MA20 金叉向上)
+            c_trend = (curr_close >= ma60_curr) and (ma20_curr >= ma60_curr)
+            
+            # 条件 2：双底抬升 (近 25 日最低价 高于 近 120 日最低价 4% 以上)
+            low_25d = df['最低'].tail(25).min()
+            low_120d = df['最低'].tail(120).min()
+            c_wbottom = low_25d > (low_120d * 1.04)
+
+            # 条件 3：短周期动能冲破中轴 (突破 48% 压制)
+            c_momentum = short_risk >= 48.0
+
+            # 条件 4：估值安全垫仍在 (长周期 PB 尚未进入高泡沫，仍处于 ≤45% 适宜上车区)
+            c_val_safe = long_risk <= 45.0
+
+            launch_checks = [c_trend, c_wbottom, c_momentum, c_val_safe]
+            launch_score = sum(launch_checks)
+
+            if launch_score >= 3 and c_val_safe:
+                launch_badge = "🚀 右侧启动初段确立！(涨得慢但很稳，果断上车)"
+                launch_style = "success"
+                launch_action = "【买入并坚定持股】长周期估值仍在安全吸筹区，但右侧趋势与动能已破局！符合原帖：‘涨得慢但很稳，周期来了，还犹豫什么？’"
+            elif launch_score >= 2:
+                launch_badge = "⚡ 异动酝酿中（初现右侧端倪，密切盯盘）"
+                launch_style = "info"
+                launch_action = "【观察准备】部分启动信号已亮起，可建立底仓观察，等待突破 60 日均线与 50% 动能中轴加仓。"
+            else:
+                launch_badge = "💤 左侧磨底沉睡期（未见右侧信号，耐心等待）"
+                launch_style = "warning"
+                launch_action = "【切忌重仓盲目冲入】虽然长线估值便宜，但短线均线仍受压制、缺乏向上动能。策略：继续‘不着急，慢慢买’分批潜伏。"
+
+            # 周期大位置核心裁决
             if long_risk >= 85 and short_risk >= 85:
                 stage = "🔴 周期大顶：长短周期同时触顶 (双共振清仓)"
                 guidance = "10年长周期估值泡沫化 + 短周期情绪极限超买！触发作者最高级别大顶预警，坚决分批离场防 40%+ 级暴跌！"
@@ -325,10 +364,42 @@ if user_input:
             # ================= 视图展示 =================
             st.subheader(f"📌 周期裁决：{stage}")
 
-            # 4 个独立指标卡
-            st.markdown("#### ⚡ 周期独立读数与核心信号")
-            c1, c2, c3, c4 = st.columns(4)
+            # 专设：【🚀 底部启动右侧雷达看板】
+            st.markdown("#### 🚀 底部启动右侧雷达 (解决不知道何时启动的痛点)")
             
+            # 状态大横幅
+            if launch_style == "success":
+                st.success(f"**判定结果：{launch_badge}**\n\n{launch_action}")
+            elif launch_style == "info":
+                st.info(f"**判定结果：{launch_badge}**\n\n{launch_action}")
+            else:
+                st.warning(f"**判定结果：{launch_badge}**\n\n{launch_action}")
+
+            # 4 项右侧启动指标打勾清单
+            r1, r2, r3, r4 = st.columns(4)
+            with r1:
+                st.metric("1. 均线生命线破局", "站上MA60" if c_trend else "受均线压制", 
+                          delta="破局确认" if c_trend else "未突破", delta_color="normal" if c_trend else "inverse")
+                st.caption(f"股价 ¥{curr_close:.2f} | 60日线 ¥{ma60_curr:.2f}")
+
+            with r2:
+                st.metric("2. 双底重心抬高", "底底抬升" if c_wbottom else "仍处前低", 
+                          delta="形态确立" if c_wbottom else "未走出", delta_color="normal" if c_wbottom else "inverse")
+                st.caption(f"近1月低点 ¥{low_25d:.2f} > 前期底 ¥{low_120d:.2f}")
+
+            with r3:
+                st.metric("3. 短周期动能破中轴", f"{short_risk:.1f} %", 
+                          delta="动能过半" if c_momentum else "动能不足", delta_color="normal" if c_momentum else "inverse")
+                st.caption("短周期读数突破 48% 压制")
+
+            with r4:
+                st.metric("4. 估值安全垫充足", f"{long_risk:.1f} %", 
+                          delta="安全吸筹区" if c_val_safe else "偏高", delta_color="normal" if c_val_safe else "inverse")
+                st.caption("长周期风险仍处于 ≤45% 底位")
+
+            # 4 个独立指标卡
+            st.markdown("#### ⚡ 周期核心独立读数")
+            c1, c2, c3, c4 = st.columns(4)
             with c1:
                 st.metric("信号 1：PB 估值位置", f"{curr_pb:.2f}")
                 st.caption("当前市净率绝对值")
@@ -349,33 +420,13 @@ if user_input:
                           delta_color="inverse" if short_risk>=85 else "normal")
                 st.caption("基于近250日价格通道情绪")
 
-            # 共振状态提示条
-            if long_risk >= 85 and short_risk >= 85:
-                st.error("🚨 **长短周期双共振触顶**：长线估值极高 且 短线情绪极度超买，见顶概率极高！")
-            elif long_risk <= 25 and short_risk <= 25:
-                st.success("🎯 **长短周期双共振触底**：长线极度低估 且 短线充分出清，黄金大底确立！")
-            elif long_risk <= 35 and short_risk >= 70:
-                st.info("💡 **长低短高（底部启动）**：长周期仍在安全低谷，短周期快速反弹，属于典型的‘涨得慢但很稳’启动期。")
-            elif long_risk >= 70 and short_risk <= 35:
-                st.warning("⚠️ **长高短低（高位假摔）**：长线估值仍在高位，短线下跌只是震荡，切勿误当成大底抄底！")
-
-            st.markdown(f"""
-            > **🎯 战术应对指南**：  
-            > **{guidance}**  
-            > *盈利状态解析*：{roe_desc}
-            """)
-
-            # ================= 图表部分：彻底消除重复，双视角精简 =================
-            st.markdown("### 📊 长短周期独立图表（已融合绝对PB与股价提示）")
-            
+            # ================= 图表部分 =================
+            st.markdown("### 📊 长短周期独立图表")
             tab_long, tab_short = st.tabs(["🔵 10年长周期估值风险 (宏观中枢)", "🟠 近2年短周期动能风险 (战术波段)"])
 
             with tab_long:
                 st.caption(f"10年动态估值中枢（底部PB {pb_floor:.2f} ~ 顶部PB {pb_cap:.2f}）。鼠标滑过可同时查看【风险读数】与【真实市净率PB】。")
-                
-                # 构建悬停复合数据矩阵：同时绑定风险读数、真实PB、真实收盘价
                 custom_hover = np.stack((df['pb'], df['收盘']), axis=-1)
-                
                 fig_long = go.Figure()
                 fig_long.add_trace(go.Scatter(
                     x=df.index, y=df['long_risk'], 
@@ -388,12 +439,11 @@ if user_input:
                 ))
                 fig_long.add_hline(y=85, line_dash="dash", line_color="red", annotation_text="长线高估警戒 (85%)")
                 fig_long.add_hline(y=25, line_dash="dash", line_color="green", annotation_text="长线大底低估 (25%)")
-                fig_long.update_layout(height=390, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近10年宏观大视野)", yaxis_title="长周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
+                fig_long.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近10年宏观大视野)", yaxis_title="长周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
                 st.plotly_chart(fig_long, use_container_width=True)
 
             with tab_short:
                 st.caption("短周期动能风险：仅精准截取近 2 年（730天）二级市场交易水温，聚焦当下战术波段买卖点。")
-                
                 two_years_cutoff = df.index[-1] - timedelta(days=730)
                 df_short = df[df.index >= two_years_cutoff]
                 custom_short_hover = np.stack((df_short['收盘'],), axis=-1)
@@ -410,7 +460,7 @@ if user_input:
                 ))
                 fig_short.add_hline(y=90, line_dash="dash", line_color="red", annotation_text="短线极度超买 (90%)")
                 fig_short.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="短线极度超卖 (20%)")
-                fig_short.update_layout(height=390, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近2年高清视角)", yaxis_title="短周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
+                fig_short.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近2年高清视角)", yaxis_title="短周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
                 st.plotly_chart(fig_short, use_container_width=True)
 
             # ================= 模块：作者同款 Tushare 极值对账 =================

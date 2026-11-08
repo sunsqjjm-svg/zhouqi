@@ -52,13 +52,10 @@ PRESET_STOCKS = {
     "钢研高纳": "sz300034", "海南橡胶": "sh601118"
 }
 
-# ================= 极速雷达扫描器：高并发稳健抓取 =================
+# ================= 极速雷达扫描器 =================
 def scan_single_stock_task(name, secid):
-    """抓取单只股票近1年收盘极值，计算短周期动能"""
     code = secid[2:]
     suf = "SS" if (code.startswith('6') or code.startswith('9')) else "SZ"
-    
-    # 优先源：雅虎 v8 图表轻量接口 (0.1秒)
     try:
         yf_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.{suf}?range=1y&interval=1d"
         res = requests.get(yf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3).json()
@@ -75,7 +72,6 @@ def scan_single_stock_task(name, secid):
     except Exception:
         pass
 
-    # 备选源：腾讯前复权 K 线
     try:
         tx_url = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,300,qfq"
         tx_r = requests.get(tx_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3).json()
@@ -203,7 +199,7 @@ def fetch_stock_data(secid, code, years=10):
         except Exception:
             pass
 
-    # 通道 3：腾讯 1000 日备选
+    # 通道 3：腾讯 1000 日兜底
     if not records:
         try:
             url_tx = f"https://web.ifzq.gtimg.cn/appstock/news/fqkline/get?param={secid},day,,,1000,qfq"
@@ -275,7 +271,7 @@ def fetch_stock_data(secid, code, years=10):
     }
     return df, meta
 
-# ================= 页面顶部：全盘自动雷达扫描看板 (精简去重版) =================
+# ================= 页面顶部：全盘自动雷达扫描看板 =================
 with st.spinner("⚡ 正在执行 26 只周期股批量打包雷达扫描..."):
     pool_data = run_pool_radar()
 
@@ -284,32 +280,37 @@ ice_stocks = [x for x in pool_data if x["short_risk"] <= 1.0]
 fire_stocks = [x for x in pool_data if x["short_risk"] >= 90.0]
 
 with st.expander(f"🔔 【全池实时雷达】26只周期股极端异动预警 (已扫描 {len(pool_data)}/26 只标的)", expanded=True):
-    col_k1, col_k2 = st.columns(2)
+    col_alert1, col_alert2 = st.columns(2)
     
-    with col_k1:
+    with col_alert1:
         st.markdown("##### 🟢 冰点潜伏梯队 (动能极低/地板区)")
         if ice_stocks:
+            st.success(f"共发现 **{len(ice_stocks)}** 只标的踩在近 1 年极限地板！")
             for item in ice_stocks:
-                st.success(f"🎯 **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **`{item['short_risk']:.1f}%`** (年内底 ¥{item['l250']:.2f})")
+                st.markdown(f"- 🎯 **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **`{item['short_risk']:.1f}%`** (年内底 ¥{item['l250']:.2f})")
         else:
-            st.info("提示：当前暂无标的绝对踩在 ≤1.0% 地线上。")
-            
-        if pool_data:
-            st.caption("🔍 **当前最靠近地板的 3 只标的明细：**")
+            st.info("暂无标的绝对踩在 ≤1.0% 地板上。")
+
+    with col_alert2:
+        st.markdown("##### 🔴 极度过热高危区 (短周期动能 ≥ 90.0%)")
+        if fire_stocks:
+            st.error(f"共发现 **{len(fire_stocks)}** 只标的摸到近 1 年天花板！")
+            for item in fire_stocks:
+                st.markdown(f"- 🚨 **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **`{item['short_risk']:.1f}%`** (年内顶 ¥{item['h250']:.2f})")
+        else:
+            st.info("暂无标的处于 ≥90.0% 的极度过热区。")
+
+    if pool_data:
+        st.markdown("---")
+        st.caption(f"🔍 **全池动能排查清单（成功获取到 {len(pool_data)} 只真实数据）：**")
+        p_c1, p_c2 = st.columns(2)
+        with p_c1:
+            st.markdown("**【当前最便宜 / 动能最低 TOP 3】**：")
             for rank_i, it in enumerate(pool_data[:3], 1):
                 flag = " 🎯 触发极寒！" if it["short_risk"] <= 1.0 else ""
                 st.markdown(f"{rank_i}. **{it['name']}** (`{it['code']}`): 动能 **`{it['short_risk']:.1f}%`** (现价 ¥{it['price']:.2f}){flag}")
-
-    with col_k2:
-        st.markdown("##### 🔴 过热警戒梯队 (动能极高/天花板)")
-        if fire_stocks:
-            for item in fire_stocks:
-                st.error(f"🚨 **{item['name']}** (`{item['code']}`)：现价 **¥{item['price']:.2f}** ｜ 动能 **`{item['short_risk']:.1f}%`** (年内顶 ¥{item['h250']:.2f})")
-        else:
-            st.info("提示：当前暂无标的绝对贴在 ≥90.0% 天花板上。")
-
-        if pool_data:
-            st.caption("🔍 **当前最靠近天花板的 3 只标的明细：**")
+        with p_c2:
+            st.markdown("**【当前最昂贵 / 动能最高 TOP 3】**：")
             for rank_i, it in enumerate(pool_data[-3:][::-1], 1):
                 flag = " 🚨 触发过热！" if it["short_risk"] >= 90.0 else ""
                 st.markdown(f"{rank_i}. **{it['name']}** (`{it['code']}`): 动能 **`{it['short_risk']:.1f}%`** (现价 ¥{it['price']:.2f}){flag}")
@@ -398,4 +399,215 @@ if user_input:
 
             # ================= 核心：【盈利调节市净率 (PB-ROE 模型)】 =================
             # 1. 稳态周期平准化 ROE：若当前因出清巨亏，取行业基准 8% 测算修复空间
-            norm_roe = max(real
+            norm_roe = max(real_roe, 8.0) if real_roe <= 0 else real_roe
+            
+            # 2. 依据资本成本(WACC=8%)测算的理论公允 PB
+            fair_pb = round(norm_roe / 8.0, 2)
+            
+            # 3. 盈利调节折溢价率 (相比理论公允 PB 的折溢价)
+            pb_discount = round(((curr_pb - fair_pb) / fair_pb) * 100.0, 1) if fair_pb > 0 else 0.0
+
+            # 4. PB-ROE 四象限体检分类
+            if real_roe >= 12.0 and curr_pb < 1.5:
+                quadrant_badge = "🌟 黄金双击区 (高ROE+低PB，严重低估错杀)"
+                quadrant_desc = f"盈利能力强悍（ROE {real_roe:.1f}%），理论公允应值 {fair_pb:.2f} 倍，实际 PB 仅 {curr_pb:.2f} 倍（折价 {abs(pb_discount):.1f}%），兼具极高安全边际与业绩戴维斯双击爆发力。"
+            elif real_roe >= 12.0 and curr_pb >= 1.5:
+                quadrant_badge = "📈 成长溢价区 (高ROE+高PB，需高景气支撑)"
+                quadrant_desc = f"净资产收益率优良，但市场已给予估值溢价（实际交易在 {curr_pb:.2f} 倍，高于公允值 {fair_pb:.2f} 倍），需警惕景气周期见顶杀估值。"
+            elif real_roe < 12.0 and curr_pb <= 1.2:
+                quadrant_badge = "⏳ 困境反转区 (低ROE/亏损+低PB，强周期大底)"
+                quadrant_desc = f"业绩深陷低谷受毒打，但实际 PB 仅 {curr_pb:.2f} 倍（折价 {abs(pb_discount):.1f}%），是典型‘股价底领先于业绩底’的极高赔率区间。"
+            else:
+                quadrant_badge = "⚠️ 价值陷阱区 (低盈利能力+估值偏贵)"
+                quadrant_desc = f"当前盈利微薄（ROE仅 {real_roe:.1f}%），理论公允只值 {fair_pb:.2f} 倍，但实际成交在 {curr_pb:.2f} 倍（溢价透支 {pb_discount:.1f}%），属于不赚钱还偏贵的状态，谨防接飞刀。"
+
+            # 【🚀 底部启动右侧雷达】
+            curr_close = df['收盘'].iloc[-1]
+            ma20_curr = df['ma20'].iloc[-1]
+            ma60_curr = df['ma60'].iloc[-1]
+            
+            c_trend = (curr_close >= ma60_curr) and (ma20_curr >= ma60_curr)
+            low_25d = df['最低'].tail(25).min()
+            low_120d = df['最低'].tail(120).min()
+            c_wbottom = low_25d > (low_120d * 1.04)
+            c_momentum = short_risk >= 48.0
+            c_val_safe = long_risk <= 45.0
+
+            launch_checks = [c_trend, c_wbottom, c_momentum, c_val_safe]
+            launch_score = sum(launch_checks)
+
+            if launch_score >= 3 and c_val_safe:
+                launch_badge = "🚀 右侧启动初段确立！(涨得慢但很稳，果断上车)"
+                launch_style = "success"
+                launch_action = "【买入并坚定持股】长周期估值仍在安全吸筹区，但右侧趋势与动能已破局！符合原帖：‘涨得慢但很稳，周期来了，还犹豫什么？’"
+            elif launch_score >= 2:
+                launch_badge = "⚡ 异动酝酿中（初现右侧端倪，密切盯盘）"
+                launch_style = "info"
+                launch_action = "【观察准备】部分启动信号已亮起，可建立底仓观察，等待突破 60 日均线与 50% 动能中轴加仓。"
+            else:
+                launch_badge = "💤 左侧磨底沉睡期（未见右侧信号，耐心等待）"
+                launch_style = "warning"
+                launch_action = "【切忌重仓盲目冲入】虽然长线估值便宜，但短线均线仍受压制、缺乏向上动能。策略：继续‘不着急，慢慢买’分批潜伏。"
+
+            # 周期位置核心裁决
+            if long_risk >= 85 and short_risk >= 85:
+                stage = "🔴 周期大顶：长短周期同时触顶 (双共振清仓)"
+                guidance = "10年长周期估值泡沫化 + 短周期情绪极限超买！触发作者最高级别大顶预警，坚决分批离场防 40%+ 级暴跌！"
+            elif risk_score >= 90:
+                stage = "🟠 周期极值高位区 (估值过热)"
+                guidance = "综合风险读数突破 90%，赔率已极低，模型建议：盘中卖掉 1/3 锁定收益，留纯利润奔跑。"
+            elif is_pb_bottom and is_roe_declining:
+                stage = "🟢 周期大底：双信号同时满足！(价格底成立)"
+                guidance = f"【黄金买点】10年长周期 PB 跌入绝对大底（≤25%）+ ROE 遭受毒打！完全符合‘股价底领先业绩底’规律，策略：‘不着急，慢慢买’！"
+            elif is_roe_declining and not is_pb_bottom:
+                stage = "⚠️ 周期下行出清期：估值未到底 (防接飞刀)"
+                guidance = f"【防盲目抄底】业绩虽然处于亏损毒打期，但 10 年估值分位（{long_risk:.1f}%）未跌透，绝不能盲目接飞刀！"
+            elif is_roe_rebounding and (20 < long_risk <= 60):
+                stage = "🟡 周期启动中段：已到半山腰"
+                guidance = "【坚定持股】正如作者所言：‘等你看到业绩转好、ROE上行时，股价往往已经到半山腰了’。走势‘涨得慢但很稳’。"
+            elif long_risk > 50 and is_roe_rebounding:
+                stage = "🔵 景气上升扩张期 (让利润奔跑)"
+                guidance = "盈利与估值双击向上，安心持股，密切监控长短周期向 90% 警戒线的推移。"
+            else:
+                stage = "⚖️ 周期中轴过渡期 (耐心观望)"
+                guidance = "处于多空平衡期，静待更极端的长短周期信号出现。"
+
+            # ================= 视图展示 =================
+            st.subheader(f"📌 周期裁决：{stage}")
+
+            # 【🚀 底部启动右侧雷达看板】
+            st.markdown("#### 🚀 底部启动右侧雷达 (解决不知道何时启动的痛点)")
+            if launch_style == "success":
+                st.success(f"**判定结果：{launch_badge}**\n\n{launch_action}")
+            elif launch_style == "info":
+                st.info(f"**判定结果：{launch_badge}**\n\n{launch_action}")
+            else:
+                st.warning(f"**判定结果：{launch_badge}**\n\n{launch_action}")
+
+            r1, r2, r3, r4 = st.columns(4)
+            with r1:
+                st.metric("1. 均线生命线破局", "站上MA60" if c_trend else "受均线压制", 
+                          delta="破局确认" if c_trend else "未突破", delta_color="normal" if c_trend else "inverse")
+                st.caption(f"股价 ¥{curr_close:.2f} | 60日线 ¥{ma60_curr:.2f}")
+
+            with r2:
+                st.metric("2. 双底重心抬高", "底底抬升" if c_wbottom else "仍处前低", 
+                          delta="形态确立" if c_wbottom else "未走出", delta_color="normal" if c_wbottom else "inverse")
+                st.caption(f"近1月低点 ¥{low_25d:.2f} > 前期底 ¥{low_120d:.2f}")
+
+            with r3:
+                st.metric("3. 短周期动能破中轴", f"{short_risk:.1f} %", 
+                          delta="动能过半" if c_momentum else "动能不足", delta_color="normal" if c_momentum else "inverse")
+                st.caption("短周期读数突破 48% 压制")
+
+            with r4:
+                st.metric("4. 估值安全垫充足", f"{long_risk:.1f} %", 
+                          delta="安全吸筹区" if c_val_safe else "偏高", delta_color="normal" if c_val_safe else "inverse")
+                st.caption("长周期风险仍处于 ≤45% 底位")
+
+            # 5 个独立指标卡：彻底修正参数错位
+            st.markdown("#### ⚡ 周期独立读数与核心信号")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            with c1:
+                st.metric("信号 1：实际 PB", f"{curr_pb:.2f} 倍")
+                st.caption("二级市场真实交易市净率")
+
+            with c2:
+                st.metric("信号 2：真实 ROE", f"{real_roe:.2f} %", delta="净亏损" if real_roe<0 else "盈利", delta_color="inverse")
+                st.caption(f"{roe_status}")
+
+            with c3:
+                # 【彻底修复：主数值展示盈利调节公允 PB，杜绝与信号1重复】
+                st.metric(
+                    "💎 盈利调节公允 PB", 
+                    f"{fair_pb:.2f} 倍", 
+                    delta=f"折价 {abs(pb_discount):.1f}% (低估)" if pb_discount < 0 else f"溢价 {pb_discount:.1f}% (高估)",
+                    delta_color="normal" if pb_discount < 0 else "inverse"
+                )
+                st.caption(f"当前实际交易在: {curr_pb:.2f} 倍")
+
+            with c4:
+                st.metric("🔵 10年长周期风险", f"{long_risk:.1f} %", 
+                          delta="大底机会" if long_risk<=25 else ("高估泡沫" if long_risk>=85 else "中性"),
+                          delta_color="inverse" if long_risk>=85 else "normal")
+                st.caption(f"10年绝对底: {pb_floor:.2f} ~ 顶: {pb_cap:.2f}")
+
+            with c5:
+                st.metric("🟠 短周期动能 (1年)", f"{short_risk:.1f} %", 
+                          delta="短线超卖" if short_risk<=20 else ("短线超买" if short_risk>=85 else "平稳"),
+                          delta_color="inverse" if short_risk>=85 else "normal")
+                st.caption("近250日价格通道水温")
+
+            # 盈利调节体检结果提示
+            st.info(f"**📊 盈利调节市净率体检结果**：{quadrant_badge}\n\n*解析*：{quadrant_desc}")
+
+            # ================= 图表部分 =================
+            st.markdown("### 📊 长短周期独立图表")
+            tab_long, tab_short = st.tabs(["🔵 10年长周期估值风险 (宏观中枢)", "🟠 近2年短周期动能风险 (战术波段)"])
+
+            with tab_long:
+                st.caption(f"10年动态估值中枢（底部PB {pb_floor:.2f} ~ 顶部PB {pb_cap:.2f}）。鼠标滑过可同时查看【风险读数】与【真实市净率PB】。")
+                custom_hover = np.stack((df['pb'], df['收盘']), axis=-1)
+                fig_long = go.Figure()
+                fig_long.add_trace(go.Scatter(
+                    x=df.index, y=df['long_risk'], 
+                    name="10年长周期风险", 
+                    line=dict(color="#1f77b4", width=2.5), 
+                    fill='tozeroy', 
+                    fillcolor='rgba(31, 119, 180, 0.08)',
+                    customdata=custom_hover,
+                    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>长周期风险读数: <b>%{y:.1f}%</b><br>对应市净率 PB: %{customdata[0]:.2f}<br>收盘价: ¥%{customdata[1]:.2f}<extra></extra>"
+                ))
+                fig_long.add_hline(y=85, line_dash="dash", line_color="red", annotation_text="长线高估警戒 (85%)")
+                fig_long.add_hline(y=25, line_dash="dash", line_color="green", annotation_text="长线大底低估 (25%)")
+                fig_long.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近10年宏观大视野)", yaxis_title="长周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
+                st.plotly_chart(fig_long, use_container_width=True)
+
+            with tab_short:
+                st.caption("短周期动能风险：仅精准截取近 2 年（730天）二级市场交易水温，聚焦当下战术波段买卖点。")
+                two_years_cutoff = df.index[-1] - timedelta(days=730)
+                df_short = df[df.index >= two_years_cutoff]
+                custom_short_hover = np.stack((df_short['收盘'],), axis=-1)
+                
+                fig_short = go.Figure()
+                fig_short.add_trace(go.Scatter(
+                    x=df_short.index, y=df_short['short_risk'], 
+                    name="近2年短周期动能", 
+                    line=dict(color="#ff7f0e", width=2), 
+                    fill='tozeroy', 
+                    fillcolor='rgba(255, 127, 14, 0.08)',
+                    customdata=custom_short_hover,
+                    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>短周期动能读数: <b>%{y:.1f}%</b><br>收盘价: ¥%{customdata[0]:.2f}<extra></extra>"
+                ))
+                fig_short.add_hline(y=90, line_dash="dash", line_color="red", annotation_text="短线极度超买 (90%)")
+                fig_short.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="短线极度超卖 (20%)")
+                fig_short.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="交易日期 (近2年高清视角)", yaxis_title="短周期读数 (%)", yaxis=dict(range=[0, 105]), hovermode="x unified")
+                st.plotly_chart(fig_short, use_container_width=True)
+
+            # ================= 模块：作者同款 Tushare 极值对账 =================
+            st.markdown("### 📋 周期极值回溯对账（复现作者复盘方法）")
+            lowest_row = df.loc[df['收盘'].idxmin()]
+            lowest_date = df['收盘'].idxmin().strftime('%Y-%m-%d')
+            lowest_price = lowest_row['最低']
+            
+            df_since_bottom = df.loc[df.index >= df['收盘'].idxmin()]
+            max_price_since = df_since_bottom['最高'].max()
+            max_date_since = df_since_bottom['最高'].idxmax().strftime('%Y-%m-%d')
+            max_gain = ((max_price_since - lowest_price) / lowest_price) * 100.0
+            curr_gain = ((curr_price - lowest_price) / lowest_price) * 100.0
+
+            col_a, col_b, col_c, col_d = st.columns(4)
+            col_a.metric("10年周期大底基准日", lowest_date)
+            col_a.caption(f"最低价: ¥{lowest_price:.2f}")
+
+            col_b.metric("大底之后最高极值", f"¥{max_price_since:.2f}")
+            col_b.caption(f"极值日: {max_date_since}")
+
+            col_c.metric("周期最大涨幅极值", f"+{max_gain:.1f} %", delta="已兑现赔率")
+            col_c.caption("最低点至最高极值")
+
+            col_d.metric("距大底当前累计涨跌", f"{'+' if curr_gain>=0 else ''}{curr_gain:.1f} %")
+            col_d.caption(f"当前收盘: ¥{curr_price:.2f}")
+
+        except Exception as e:
+            st.error(f"数据解析异常: {e}")

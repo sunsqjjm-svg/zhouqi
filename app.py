@@ -274,7 +274,7 @@ def fetch_stock_data(secid, code, years=10):
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
 
-    # 均线系统
+    # 均线系统 (用于右侧启动雷达)
     df['ma20'] = df['收盘'].rolling(20, min_periods=5).mean()
     df['ma60'] = df['收盘'].rolling(60, min_periods=10).mean()
 
@@ -435,16 +435,16 @@ if user_input:
             # 4. PB-ROE 四象限体检分类
             if real_roe >= 12.0 and curr_pb < 1.5:
                 quadrant_badge = "🌟 黄金双击区 (高ROE+低PB，严重低估错杀)"
-                quadrant_desc = f"盈利能力强悍（ROE {real_roe:.1f}%），且 PB 仅 {curr_pb:.2f}，兼具安全边际与业绩戴维斯双击爆发力。"
+                quadrant_desc = f"盈利能力强悍（ROE {real_roe:.1f}%），且实际 PB 仅 {curr_pb:.2f} 倍（公允应值 {fair_pb:.2f} 倍），兼具极高安全边际与业绩戴维斯双击爆发力。"
             elif real_roe >= 12.0 and curr_pb >= 1.5:
                 quadrant_badge = "📈 成长溢价区 (高ROE+高PB，需高景气支撑)"
-                quadrant_desc = f"净资产收益率优良，但市场已给予估值溢价（PB {curr_pb:.2f}），需警惕景气周期见顶杀估值。"
+                quadrant_desc = f"净资产收益率优良，但市场已给予估值溢价（实际 PB {curr_pb:.2f} 倍），需警惕景气周期见顶杀估值。"
             elif real_roe < 12.0 and curr_pb <= 1.2:
                 quadrant_badge = "⏳ 困境反转区 (低ROE/亏损+低PB，强周期大底)"
-                quadrant_desc = f"业绩深陷低谷受毒打，但 PB 仅 {curr_pb:.2f}（折价 {abs(pb_discount):.1f}%），是典型‘股价底领先于业绩底’的赔率区间。"
+                quadrant_desc = f"业绩深陷低谷受毒打，但实际 PB 仅 {curr_pb:.2f} 倍（折价 {abs(pb_discount):.1f}%），是典型‘股价底领先于业绩底’的极高赔率区间。"
             else:
                 quadrant_badge = "⚠️ 价值陷阱区 (低盈利能力+估值偏贵)"
-                quadrant_desc = f"当前盈利微薄或亏损，且 PB 仍有 {curr_pb:.2f}，属于典型不赚钱还偏贵的状态，谨防中途接飞刀。"
+                quadrant_desc = f"当前盈利微薄（ROE {real_roe:.1f}%），公允只值 {fair_pb:.2f} 倍，但实际成交在 {curr_pb:.2f} 倍（溢价 {pb_discount:.1f}%），属于不赚钱还偏贵的状态，谨防接飞刀。"
 
             # 【🚀 底部启动右侧雷达】
             curr_close = df['收盘'].iloc[-1]
@@ -530,26 +530,26 @@ if user_input:
                           delta="安全吸筹区" if c_val_safe else "偏高", delta_color="normal" if c_val_safe else "inverse")
                 st.caption("长周期风险仍处于 ≤45% 底位")
 
-            # 5 个独立指标卡：正式引入【盈利调节市净率】
+            # 5 个独立指标卡：彻底修复展示逻辑
             st.markdown("#### ⚡ 周期独立读数与核心信号")
             c1, c2, c3, c4, c5 = st.columns(5)
             with c1:
                 st.metric("信号 1：实际 PB", f"{curr_pb:.2f} 倍")
-                st.caption("当前市净率绝对值")
+                st.caption("当前二级市场实际市净率")
 
             with c2:
                 st.metric("信号 2：真实 ROE", f"{real_roe:.2f} %", delta="净亏损" if real_roe<0 else "盈利", delta_color="inverse")
                 st.caption(f"{roe_status}")
 
             with c3:
-                # 【新增核心指标卡】
+                # 【彻底修复：主数值展示盈利调节折算后的理论公允 PB】
                 st.metric(
-                    "💎 盈利调节市净率", 
-                    f"{curr_pb:.2f} 倍", 
-                    delta=f"折价 {abs(pb_discount):.1f}%" if pb_discount < 0 else f"溢价 {pb_discount:.1f}%",
+                    "💎 盈利调节公允 PB", 
+                    f"{fair_pb:.2f} 倍", 
+                    delta=f"折价 {abs(pb_discount):.1f}% (低估)" if pb_discount < 0 else f"溢价 {pb_discount:.1f}% (透支)",
                     delta_color="normal" if pb_discount < 0 else "inverse"
                 )
-                st.caption(f"理论公允PB: {fair_pb:.2f} 倍")
+                st.caption(f"实际交易在: {curr_pb:.2f} 倍")
 
             with c4:
                 st.metric("🔵 10年长周期风险", f"{long_risk:.1f} %", 

@@ -398,8 +398,8 @@ if user_input:
                 roe_desc = "盈利水平处于常态化波动区间。"
 
             # ================= 核心：【盈利调节市净率 (PB-ROE 模型)】 =================
-            # 1. 稳态周期平准化 ROE：若当前因出清巨亏，取行业基准 8% 测算修复空间
-            norm_roe = max(real_roe, 8.0) if real_roe <= 0 else real_roe
+            # 修复后：彻底消除微利低估惩罚漏洞（ROE 低于 8% 时一律取 8% 稳态中枢）
+            norm_roe = max(real_roe, 8.0)
             
             # 2. 依据资本成本(WACC=8%)测算的理论公允 PB
             fair_pb = round(norm_roe / 8.0, 2)

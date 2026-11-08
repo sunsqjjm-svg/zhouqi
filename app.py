@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="强周期股票双信号拐点诊断仪", layout="wide", page_icon="🎯")
 
 st.title("🎯 强周期股票：长短周期独立诊断仪")
-st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜全池26只极值动能自动雷达扫描")
+st.caption("基于雪球「律动周期研究所」逻辑：股价底领先业绩底｜ROE下行末端 + PB底部 = 价格底｜全池26只极值动能自动雷达扫描｜集成PB-ROE盈利调节市净率")
 
 # 安全浮点数转换器
 def safe_float(val, default=0.0):
@@ -55,13 +55,11 @@ PRESET_STOCKS = {
 @st.cache_data(ttl=180)
 def run_pool_radar():
     """单次打包请求东方财富官方多股聚合行情，直取最新价、52周最高与最低"""
-    # 构造东财批量请求格式: 0.002237,1.600866...
     em_secids = []
     for name, secid in PRESET_STOCKS.items():
         em_secids.append(get_em_secid(secid[2:]))
     secids_str = ",".join(em_secids)
 
-    # f2: 最新价 | f12: 代码 | f14: 名字 | f174: 52周最高 | f175: 52周最低
     url = (
         f"https://push2.eastmoney.com/api/qt/ulist.np/get?"
         f"fltt=2&fields=f2,f12,f14,f174,f175&"
@@ -85,7 +83,6 @@ def run_pool_radar():
             h_52 = safe_float(it.get("f174"))
             l_52 = safe_float(it.get("f175"))
 
-            # 必须拿到真实的价格与52周通道
             if c_now > 0 and h_52 > l_52:
                 short_risk = round(((c_now - l_52) / (h_52 - l_52)) * 100.0, 1)
                 results.append({
@@ -99,7 +96,6 @@ def run_pool_radar():
     except Exception:
         pass
 
-    # 若东财网络偶发拦截，采用无鉴权雅虎 v8 图表轻量备选 (绝无 401 拦截)
     if len(results) < 10:
         for name, secid in PRESET_STOCKS.items():
             try:
@@ -126,7 +122,6 @@ def run_pool_radar():
             except Exception:
                 continue
 
-    # 按短周期动能由低到高严格排序
     results.sort(key=lambda x: x["short_risk"])
     return results
 
@@ -162,7 +157,7 @@ def search_stock(keyword):
 def fetch_stock_data(secid, code, years=10):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.qq.com"}
     
-    # 实时行情 (腾讯)
+    # 实时行情
     r_q = requests.get(f"https://qt.gtimg.cn/q={secid}", headers=headers, timeout=6)
     r_q.encoding = "gbk"
     parts = r_q.text.split('="')[1].split('~')
@@ -202,7 +197,7 @@ def fetch_stock_data(secid, code, years=10):
     except Exception:
         pass
 
-    # 通道 2：雅虎 v8 图表 10 年直连 (无 401 拦截)
+    # 通道 2：雅虎 v8 直连备选
     if len(records) < 1000:
         try:
             records = []
@@ -279,7 +274,7 @@ def fetch_stock_data(secid, code, years=10):
     roll_low = df['收盘'].rolling(250, min_periods=30).min()
     df['short_risk'] = (((df['收盘'] - roll_low) / (roll_high - roll_low).replace(0, 1)) * 100.0).clip(0, 100).round(1)
 
-    # 均线系统 (用于右侧启动雷达)
+    # 均线系统
     df['ma20'] = df['收盘'].rolling(20, min_periods=5).mean()
     df['ma60'] = df['收盘'].rolling(60, min_periods=10).mean()
 
@@ -330,7 +325,6 @@ with st.expander(f"🔔 【全池实时雷达】26只周期股极端异动预警
         else:
             st.info("暂无标的处于 ≥90.0% 的极度过热区。")
 
-    # 全盘实时动能透明排行榜
     if pool_data:
         st.markdown("---")
         st.caption(f"🔍 **全池动能排查清单（成功获取到 {len(pool_data)} 只真实数据）：**")
@@ -428,6 +422,30 @@ if user_input:
                 is_roe_rebounding = False
                 roe_desc = "盈利水平处于常态化波动区间。"
 
+            # ================= 新增核心：【盈利调节市净率 (PB-ROE 模型)】 =================
+            # 1. 稳态周期平准化 ROE：若当前因出清巨亏，取行业基准 8% 测算修复空间
+            norm_roe = max(real_roe, 8.0) if real_roe <= 0 else real_roe
+            
+            # 2. 依据资本成本(WACC=8%)测算的理论公允 PB
+            fair_pb = round(norm_roe / 8.0, 2)
+            
+            # 3. 盈利调节折溢价率
+            pb_discount = round(((curr_pb - fair_pb) / fair_pb) * 100.0, 1) if fair_pb > 0 else 0.0
+
+            # 4. PB-ROE 四象限体检分类
+            if real_roe >= 12.0 and curr_pb < 1.5:
+                quadrant_badge = "🌟 黄金双击区 (高ROE+低PB，严重低估错杀)"
+                quadrant_desc = f"盈利能力强悍（ROE {real_roe:.1f}%），且 PB 仅 {curr_pb:.2f}，兼具安全边际与业绩戴维斯双击爆发力。"
+            elif real_roe >= 12.0 and curr_pb >= 1.5:
+                quadrant_badge = "📈 成长溢价区 (高ROE+高PB，需高景气支撑)"
+                quadrant_desc = f"净资产收益率优良，但市场已给予估值溢价（PB {curr_pb:.2f}），需警惕景气周期见顶杀估值。"
+            elif real_roe < 12.0 and curr_pb <= 1.2:
+                quadrant_badge = "⏳ 困境反转区 (低ROE/亏损+低PB，强周期大底)"
+                quadrant_desc = f"业绩深陷低谷受毒打，但 PB 仅 {curr_pb:.2f}（折价 {abs(pb_discount):.1f}%），是典型‘股价底领先于业绩底’的赔率区间。"
+            else:
+                quadrant_badge = "⚠️ 价值陷阱区 (低盈利能力+估值偏贵)"
+                quadrant_desc = f"当前盈利微薄或亏损，且 PB 仍有 {curr_pb:.2f}，属于典型不赚钱还偏贵的状态，谨防中途接飞刀。"
+
             # 【🚀 底部启动右侧雷达】
             curr_close = df['收盘'].iloc[-1]
             ma20_curr = df['ma20'].iloc[-1]
@@ -512,28 +530,41 @@ if user_input:
                           delta="安全吸筹区" if c_val_safe else "偏高", delta_color="normal" if c_val_safe else "inverse")
                 st.caption("长周期风险仍处于 ≤45% 底位")
 
-            # 4 个独立指标卡
+            # 5 个独立指标卡：正式引入【盈利调节市净率】
             st.markdown("#### ⚡ 周期独立读数与核心信号")
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5 = st.columns(5)
             with c1:
-                st.metric("信号 1：PB 估值位置", f"{curr_pb:.2f}")
+                st.metric("信号 1：实际 PB", f"{curr_pb:.2f} 倍")
                 st.caption("当前市净率绝对值")
 
             with c2:
-                st.metric("信号 2：真实 ROE 状态", f"{real_roe:.2f} %", delta="净亏损" if real_roe<0 else "盈利", delta_color="inverse")
+                st.metric("信号 2：真实 ROE", f"{real_roe:.2f} %", delta="净亏损" if real_roe<0 else "盈利", delta_color="inverse")
                 st.caption(f"{roe_status}")
 
             with c3:
-                st.metric(f"🔵 10年长周期风险", f"{long_risk:.1f} %", 
+                # 【新增核心指标卡】
+                st.metric(
+                    "💎 盈利调节市净率", 
+                    f"{curr_pb:.2f} 倍", 
+                    delta=f"折价 {abs(pb_discount):.1f}%" if pb_discount < 0 else f"溢价 {pb_discount:.1f}%",
+                    delta_color="normal" if pb_discount < 0 else "inverse"
+                )
+                st.caption(f"理论公允PB: {fair_pb:.2f} 倍")
+
+            with c4:
+                st.metric("🔵 10年长周期风险", f"{long_risk:.1f} %", 
                           delta="大底机会" if long_risk<=25 else ("高估泡沫" if long_risk>=85 else "中性"),
                           delta_color="inverse" if long_risk>=85 else "normal")
                 st.caption(f"10年绝对底: {pb_floor:.2f} ~ 顶: {pb_cap:.2f}")
 
-            with c4:
-                st.metric("🟠 短周期风险读数 (1年动能)", f"{short_risk:.1f} %", 
+            with c5:
+                st.metric("🟠 短周期动能 (1年)", f"{short_risk:.1f} %", 
                           delta="短线超卖" if short_risk<=20 else ("短线超买" if short_risk>=85 else "平稳"),
                           delta_color="inverse" if short_risk>=85 else "normal")
-                st.caption("基于近250日价格通道情绪")
+                st.caption("近250日价格通道水温")
+
+            # 盈利调节体检结果提示
+            st.info(f"**📊 盈利调节市净率体检结果**：{quadrant_badge}\n\n*解析*：{quadrant_desc}")
 
             # ================= 图表部分 =================
             st.markdown("### 📊 长短周期独立图表")
